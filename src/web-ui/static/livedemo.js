@@ -1,4 +1,4 @@
-import { cameraErrorMessage, getLandmarker, nextTimestamp } from './live.js';
+import { RECORDER_TYPES, cameraErrorMessage, getLandmarker, nextTimestamp } from './live.js';
 import { clearCanvas, drawSkeleton, fitCanvas } from './skeleton.js';
 
 const $ = (id) => document.getElementById(id);
@@ -28,6 +28,10 @@ const LAG_AFTER = 0.1; // seconds the user may lead
 const SMOOTH_TAU = 0.25; // seconds; time constant of the meter's smoothing
 const COUNTDOWN_S = 3;
 const GHOST_COLOR = 'rgba(255, 255, 255, 0.75)';
+const MIN_RECORDING_S = 1;
+// Webcam clips recorded here or on the main page's Live tab. They're shown mirrored, the way the
+// user saw themselves while recording, and scored unmirrored: repeat your own moves.
+const SELF_RECORDING = /^(me|webcam)-/;
 
 // Landmark index of the same point on the other side of the body, for mirroring.
 const SWAP = Array.from({ length: 33 }, (_, i) => i);
@@ -116,7 +120,7 @@ function fitGhost(refFrame, refSize, userImage, userVis, camSize) {
 
 const refVideo = $('ref-video');
 const camVideo = $('cam-video');
-let ref = null; // {jobId, fps, size, frames: {plain, mirrored}}
+let ref = null; // {jobId, fps, size, self, frames: {plain, mirrored}}
 let loadToken = 0;
 
 const cam = { on: false, session: 0, stream: null, landmarker: null, lastVideoTime: -1 };
@@ -127,6 +131,7 @@ let run = { sum: 0, count: 0 }; // raw scores while the video plays, for the fin
 let finalScore = null;
 let countdownToken = 0;
 let counting = false;
+const rec = { recorder: null, chunks: [], startedAt: 0, token: 0, counting: false, timer: null };
 
 // ---------------------------------------------------------------- reference video
 
@@ -153,12 +158,15 @@ $('demo-file').addEventListener('change', async (e) => {
   if (file) await uploadAndProcess(file);
 });
 
-async function uploadAndProcess(file) {
+/** Upload a video as a new job, wait for the pipeline, then load it as the dancer. */
+async function uploadAndProcess(file, { duration } = {}) {
   const token = ++loadToken;
   const form = new FormData();
   form.append('file', file);
   form.append('model', $('demo-model').value);
   form.append('smooth', '0.2');
+  // Browser recordings don't store a reliable frame rate; the server derives it from the length.
+  if (duration) form.append('duration', duration.toFixed(3));
   showProgress(0, `Uploading ${file.name}…`);
   setStatus('');
   try {
@@ -199,18 +207,29 @@ async function loadReference(jobId) {
     jobId,
     fps: data.fps,
     size: data.video_size,
+    self: SELF_RECORDING.test(job.filename),
     frames: { plain: buildFrames(data, false), mirrored: buildFrames(data, true) },
   };
   $('job-select').value = jobId;
-  $('ref-caption').textContent = `Dancer · ${job.filename}`;
+  $('ref-caption').textContent = `${ref.self ? 'Your recording' : 'Dancer'} · ${job.filename}`;
+  $('ref-stage').classList.toggle('mirrored', ref.self);
+  $('mirror-moves').checked = !ref.self;
   history.replaceState(null, '', `?job=${jobId}`);
   refVideo.src = `/api/jobs/${jobId}/video`;
   refVideo.playbackRate = Number($('demo-speed').value);
   resetRun();
   $('play-btn').disabled = false;
   $('restart-btn').disabled = false;
-  setStatus(cam.on ? 'Ready. Press Play and copy the dancer.' : 'Ready. Start the camera, then press Play.');
+  setStatus(cam.on ? `Ready. Press Play and copy ${ref.self ? 'yourself' : 'the dancer'}.` : 'Ready. Start the camera, then press Play.');
 }
+
+// MediaRecorder WebM files have no duration in their header, so the browser reports Infinity and
+// can't seek them. Seeking far past the end makes it scan the file and find the real duration.
+refVideo.addEventListener('loadedmetadata', () => {
+  if (refVideo.duration !== Infinity) return;
+  refVideo.addEventListener('durationchange', () => { refVideo.currentTime = 0; }, { once: true });
+  refVideo.currentTime = 1e101;
+});
 
 refVideo.addEventListener('error', () => {
   if (ref) setStatus('Your browser can’t play this video format; try converting it to .mp4.', true);
@@ -323,11 +342,13 @@ async function startCamera() {
   cam.on = true;
   btn.disabled = false;
   btn.textContent = 'Stop camera';
-  setStatus(ref ? 'Camera on. Press Play and copy the dancer.' : 'Camera on. Pick a video above.');
+  if (ref) setStatus(`Camera on. Press Play and copy ${ref.self ? 'yourself' : 'the dancer'}.`);
+  else setStatus('Camera on. Pick a video above, or record yourself.');
   scheduleFrame(session);
 }
 
 function stopCamera() {
+  if (rec.recorder || rec.counting) cancelRecording();
   cam.session++;
   cam.on = false;
   releaseCamera();
@@ -370,7 +391,9 @@ function processCameraFrame(now) {
 
   let raw = null;
   let ghost = null;
-  if (!world) {
+  if (rec.recorder || rec.counting) {
+    hint = 'recording';
+  } else if (!world) {
     hint = 'step into view';
   } else if (!ref) {
     hint = 'pick a video';
@@ -399,6 +422,92 @@ function processCameraFrame(now) {
     run.sum += raw ?? 0;
     run.count++;
   }
+}
+
+// ---------------------------------------------------------------- recording yourself
+
+$('rec-btn').addEventListener('click', () => {
+  if (rec.recorder) finishRecording();
+  else if (rec.counting) cancelRecording();
+  else startRecording();
+});
+
+async function startRecording() {
+  if (!cam.on) await startCamera();
+  if (!cam.on) return;
+  stopPlayback();
+  const token = ++rec.token;
+  rec.counting = true;
+  updateRecordButton();
+  setStatus('Get into position…');
+  const el = $('cam-countdown');
+  el.hidden = false;
+  for (let n = COUNTDOWN_S; n > 0; n--) {
+    el.textContent = n;
+    await sleep(1000);
+    if (token !== rec.token) return;
+  }
+  el.hidden = true;
+  rec.counting = false;
+  if (!cam.stream) return;
+
+  const mimeType = RECORDER_TYPES.find((t) => MediaRecorder.isTypeSupported(t));
+  rec.chunks = [];
+  rec.recorder = new MediaRecorder(cam.stream, mimeType ? { mimeType } : undefined);
+  rec.recorder.ondataavailable = (e) => { if (e.data.size) rec.chunks.push(e.data); };
+  rec.recorder.start(1000);
+  rec.startedAt = performance.now();
+  updateRecordButton();
+  const showTime = () => {
+    const secs = Math.floor((performance.now() - rec.startedAt) / 1000);
+    setStatus(`Recording ${Math.floor(secs / 60)}:${String(secs % 60).padStart(2, '0')}. Dance, then press Stop to use it as the dancer.`);
+  };
+  showTime();
+  rec.timer = setInterval(showTime, 250);
+}
+
+function finishRecording() {
+  const recorder = rec.recorder;
+  const duration = (performance.now() - rec.startedAt) / 1000;
+  clearInterval(rec.timer);
+  rec.recorder = null;
+  updateRecordButton();
+  if (duration < MIN_RECORDING_S) {
+    recorder.onstop = null;
+    recorder.stop();
+    setStatus('That recording was too short; try again.', true);
+    return;
+  }
+  recorder.onstop = () => {
+    const type = recorder.mimeType || 'video/webm';
+    const ext = type.includes('mp4') ? 'mp4' : 'webm';
+    const stamp = new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-');
+    const file = new File(rec.chunks, `me-${stamp}.${ext}`, { type });
+    rec.chunks = [];
+    uploadAndProcess(file, { duration });
+  };
+  recorder.stop();
+}
+
+function cancelRecording() {
+  rec.token++;
+  rec.counting = false;
+  $('cam-countdown').hidden = true;
+  clearInterval(rec.timer);
+  if (rec.recorder) {
+    rec.recorder.onstop = null;
+    rec.recorder.stop();
+    rec.recorder = null;
+  }
+  rec.chunks = [];
+  updateRecordButton();
+  setStatus('Recording cancelled.');
+}
+
+function updateRecordButton() {
+  const btn = $('rec-btn');
+  btn.textContent = rec.recorder ? '■ Stop & use as dancer' : rec.counting ? '✕ Cancel' : '● Record yourself';
+  btn.classList.toggle('recording', Boolean(rec.recorder));
 }
 
 // ---------------------------------------------------------------- display loop

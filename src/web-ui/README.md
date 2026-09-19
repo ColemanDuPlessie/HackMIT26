@@ -63,6 +63,10 @@ pose, detected live in the browser by MediaPipe, is scored against the dancer's 
 - **Mirror the dancer** (on by default) scores you as a mirror image, like dance games: raise your left arm
   when they raise their right. **Show dancer on me** draws the dancer's pose in white over your webcam,
   fitted to your hips and torso length. **Speed** slows the video down for learning.
+- **Record yourself** records your webcam (after a 3-2-1 countdown), runs it through the pipeline when you
+  press **Stop & use as dancer**, and loads it as the reference, so you can test how well you repeat your own
+  moves. Your recordings (`me-*` here, `webcam-*` from the Live tab) are shown mirrored, as you saw yourself
+  while recording, and scored with **Mirror the dancer** off: repeat the same moves on the same side.
 - Link to a specific video with `/livedemo?job=<id>`.
 
 To open it from another device (e.g. `https://192.168.1.20:8000/livedemo`), the page must be https, since

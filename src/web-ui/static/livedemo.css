@@ -56,7 +56,9 @@ header, main { position: relative; z-index: 1; }
 .progress-text { margin: 8px 0 0; color: var(--muted); font-size: 13px; }
 #demo-controls label:not(.toggle) { display: flex; flex-direction: column; gap: 4px; color: var(--muted); font-size: 13px; }
 
-#cam-stage.mirrored video, #cam-stage.mirrored canvas { transform: scaleX(-1); }
+#cam-stage.mirrored video, #cam-stage.mirrored canvas,
+#ref-stage.mirrored video, #ref-stage.mirrored canvas { transform: scaleX(-1); }
+#rec-btn.recording { background: #3a1d22; border-color: var(--error); color: #ffc9c9; }
 #ref-overlay, #ghost-overlay, #cam-overlay { pointer-events: none; }
 
 .countdown {

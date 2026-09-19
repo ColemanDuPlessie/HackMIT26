@@ -9,7 +9,7 @@ const WASM_URL = 'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@1.0.1/was
 const MODEL_URL = (variant) =>
   `https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_${variant}/float16/latest/pose_landmarker_${variant}.task`;
 const REPLY_TIMEOUT_MS = 1000; // give up on a lost WebSocket reply after this long
-const RECORDER_TYPES = ['video/webm;codecs=vp9', 'video/webm;codecs=vp8', 'video/webm', 'video/mp4'];
+export const RECORDER_TYPES = ['video/webm;codecs=vp9', 'video/webm;codecs=vp8', 'video/webm', 'video/mp4'];
 
 // Landmarkers are expensive to create, so keep one per model variant for the page's lifetime.
 // VIDEO mode requires strictly increasing timestamps per landmarker, tracked in lastTimestamp.

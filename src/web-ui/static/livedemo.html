@@ -65,6 +65,7 @@
 
     <section class="card live-bar" id="demo-controls">
       <button id="cam-btn" class="primary">Start camera</button>
+      <button id="rec-btn" title="Record yourself, then try to match your own recording">● Record yourself</button>
       <button id="play-btn" disabled>▶ Play</button>
       <button id="restart-btn" disabled>↺ Restart</button>
       <label>Speed
@@ -96,11 +97,13 @@
           <video id="cam-video" muted playsinline></video>
           <canvas id="ghost-overlay"></canvas>
           <canvas id="cam-overlay"></canvas>
+          <div id="cam-countdown" class="countdown" hidden></div>
         </div>
       </figure>
     </div>
     <p class="live-note">Scoring compares the direction of your arms, legs and torso with the dancer's, allowing
-      a moment of reaction lag. Stand back so your whole body is in view.</p>
+      a moment of reaction lag. Stand back so your whole body is in view.
+      <strong>Record yourself</strong> turns your own webcam clip into the dancer, so you can test how well you repeat it.</p>
   </main>
 
   <script type="module" src="/static/livedemo.js"></script>
