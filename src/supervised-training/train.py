@@ -202,9 +202,13 @@ def main():
 
     uses = state["uses"]
     held_out = set(state["val"])
-    # Least-used first, so every clip reaches the cap before any clip exceeds the others.
-    queue = sorted((n for n in clips_available if n not in held_out), key=lambda n: (uses.get(n, 0), n))
-    queue = [n for n in queue if uses.get(n, 0) < args.max_uses]
+
+    def next_queue() -> list[str]:
+        """Clips still under the cap, least-used first, so passes spread evenly."""
+        under = [n for n in clips_available if n not in held_out and uses.get(n, 0) < args.max_uses]
+        return sorted(under, key=lambda n: (uses.get(n, 0), n))
+
+    queue = next_queue()
     if not queue:
         raise SystemExit(f"Every prepared clip has been used {args.max_uses} times. Prepare more "
                          f"clips (prepare_data.py), raise --max-uses, or pass --fresh.")
@@ -218,7 +222,10 @@ def main():
     deadline = time.time() + args.minutes * 60
     run = {"started": time.time(), "steps": 0, "clips": 0, "loss": None}
 
-    for start in range(0, len(queue), args.shard_clips):
+    sweep = 0
+    while queue and not stop["now"] and time.time() < deadline:
+      sweep += 1
+      for start in range(0, len(queue), args.shard_clips):
         if stop["now"] or time.time() >= deadline:
             break
         names = queue[start : start + args.shard_clips]
@@ -254,7 +261,7 @@ def main():
         val = evaluate(model, val_loader, args, device)
         run["loss"] = float(np.mean(losses)) if losses else run["loss"]
         left = max(0.0, deadline - time.time()) / 60
-        print(f"step {state['step']:6d}  passes {sum(uses.values()):5d}  "
+        print(f"sweep {sweep}  step {state['step']:6d}  passes {sum(uses.values()):5d}  "
               f"train {run['loss']:.4f}  val {val['loss']:.4f}  {left:.0f} min left")
 
         state["model_state"] = model.state_dict()
@@ -264,6 +271,7 @@ def main():
         if val["loss"] < state["best_val"]:
             state["best_val"] = val["loss"]
             save(args.out / "best.pt", slim(state, model, stats, fps, state["val"]))
+      queue = next_queue()  # clips that have hit the cap drop out; the rest come round again
 
     # ---------------------------------------------------------------- finish
     minutes = (time.time() - run["started"]) / 60

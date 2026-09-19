@@ -55,9 +55,10 @@ uv run generate.py some_song.mp3 --retarget danced_motion.npz
 
 - **`--minutes`** caps wall-clock time. The run stops cleanly at the cap, after the current
   shard, and Ctrl-C does the same.
-- **`--max-uses`** (5) caps how often a clip may *ever* be trained on. The checkpoint counts
-  each clip's passes, and every run takes the least-used clips first, so the dataset is
-  consumed evenly and nothing is over-trained.
+- **`--max-uses`** (5) caps how often a clip may *ever* be trained on, across all runs. The
+  checkpoint counts each clip's passes. Within a run the data is swept repeatedly, least-used
+  clips first, until either the time budget runs out or every clip has hit the cap, so the
+  dataset is consumed evenly and nothing is over-trained.
 - **Resuming is the default.** Re-running the same command continues from
   `checkpoints/checkpoint.pt`: same step count, same optimiser state, same LR schedule,
   same held-out validation clips, and it automatically picks up clips prepared since.
