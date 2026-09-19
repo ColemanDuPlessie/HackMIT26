@@ -1,1 +1,2 @@
-dataset/
+dataset/*
+!dataset/download_aist.py
