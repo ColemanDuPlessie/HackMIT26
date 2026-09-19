@@ -31,7 +31,7 @@ def audio_features(wav: np.ndarray, sr: int, fps: float, n_frames: int | None = 
     mfcc = librosa.feature.mfcc(y=wav, sr=sr, n_mfcc=N_MFCC, hop_length=hop)
     chroma = librosa.feature.chroma_cens(y=wav, sr=sr, hop_length=hop)
 
-    peaks = librosa.onset.onset_detect(onset_envelope=envelope, sr=sr, hop_length=hop)
+    peaks = onset_peaks(envelope)
     _, beats = librosa.beat.beat_track(onset_envelope=envelope, sr=sr, hop_length=hop, tightness=100)
 
     frames = len(envelope)
@@ -45,6 +45,24 @@ def audio_features(wav: np.ndarray, sr: int, fps: float, n_frames: int | None = 
     ], axis=0).T.astype(np.float32)
     assert feats.shape[1] == AUDIO_DIM, feats.shape
     return fit_length(feats, n_frames) if n_frames else feats
+
+
+def onset_peaks(envelope: np.ndarray, pre: int = 3, post: int = 3, delta: float = 0.5) -> np.ndarray:
+    """Frames where the onset envelope peaks: a local maximum that stands out from its neighbourhood.
+
+    This replaces librosa.onset.onset_detect, whose numba-compiled peak picker segfaults in
+    this environment once MediaPipe has been imported into the same process (the rest of
+    librosa is fine). Plain NumPy, and close enough for a binary "is this frame an onset"
+    feature: a local max over +/-`pre`/`post` frames, at least `delta` above the local mean.
+    """
+    n = len(envelope)
+    if n < 3:
+        return np.zeros(0, dtype=int)
+    padded = np.pad(envelope, (pre, post), mode="edge")
+    windows = np.lib.stride_tricks.sliding_window_view(padded, pre + post + 1)
+    is_max = envelope >= windows.max(axis=1)
+    loud_enough = envelope >= windows.mean(axis=1) + delta * envelope.std()
+    return np.flatnonzero(is_max & loud_enough)
 
 
 def fit_length(x: np.ndarray, n: int) -> np.ndarray:
