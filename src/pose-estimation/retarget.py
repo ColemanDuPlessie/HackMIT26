@@ -30,6 +30,8 @@ import mujoco
 import numpy as np
 from scipy.signal import savgol_filter
 
+import visualize
+
 DEFAULT_MODEL = Path(__file__).parent / "humanoid.xml"
 
 # Kinematic tree over MediaPipe landmarks, used to rebuild the skeleton with model
@@ -167,53 +169,6 @@ def solve(model: mujoco.MjModel, targets: np.ndarray, visibility: np.ndarray,
     return qpos, err
 
 
-def render(model: mujoco.MjModel, qpos: np.ndarray, targets: np.ndarray, fps: float, path: str):
-    import cv2
-
-    data = mujoco.MjData(model)
-    renderer = mujoco.Renderer(model, 720, 1280)
-    cam = mujoco.MjvCamera()
-    cam.distance, cam.azimuth, cam.elevation = 3.5, 150.0, -15.0
-    writer = cv2.VideoWriter(path, cv2.VideoWriter_fourcc(*"mp4v"), fps, (1280, 720))
-    for q, t in zip(qpos, targets):
-        data.qpos[:] = q
-        mujoco.mj_forward(model, data)
-        cam.lookat[:] = data.body("pelvis").xpos
-        renderer.update_scene(data, cam)
-        _add_target_markers(renderer.scene, t)
-        writer.write(cv2.cvtColor(renderer.render(), cv2.COLOR_RGB2BGR))
-    writer.release()
-    renderer.close()
-    print(f"Rendered {path}")
-
-
-def _add_target_markers(scene: mujoco.MjvScene, t: np.ndarray):
-    for i in TRACKED:
-        if scene.ngeom >= scene.maxgeom:
-            return
-        mujoco.mjv_initGeom(scene.geoms[scene.ngeom], mujoco.mjtGeom.mjGEOM_SPHERE, np.array([0.02, 0, 0]),
-                            t[i], np.eye(3).ravel(), np.array([0.1, 0.9, 0.3, 0.8], dtype=np.float32))
-        scene.ngeom += 1
-
-
-def view(model: mujoco.MjModel, qpos: np.ndarray, targets: np.ndarray, fps: float):
-    import mujoco.viewer
-
-    data = mujoco.MjData(model)
-    with mujoco.viewer.launch_passive(model, data) as viewer:
-        f = 0
-        while viewer.is_running():
-            start = time.time()
-            data.qpos[:] = qpos[f]
-            mujoco.mj_forward(model, data)
-            with viewer.lock():
-                viewer.user_scn.ngeom = 0
-                _add_target_markers(viewer.user_scn, targets[f])
-            viewer.sync()
-            f = (f + 1) % len(qpos)
-            time.sleep(max(0.0, 1.0 / fps - (time.time() - start)))
-
-
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("keypoints", help=".npz from extract_keypoints.py")
@@ -221,7 +176,7 @@ def main():
     parser.add_argument("--model", default=str(DEFAULT_MODEL), help="MJCF with mp_<i> sites")
     parser.add_argument("--smooth", type=float, default=0.2, help="smoothing window in seconds (0 disables)")
     parser.add_argument("--iters", type=int, default=20, help="IK iterations per frame")
-    parser.add_argument("--render", metavar="MP4", help="render the result to a video file")
+    parser.add_argument("--render", metavar="MP4", help="render the result to a video file (see visualize.py)")
     parser.add_argument("--view", action="store_true", help="play back in the MuJoCo viewer (use mjpython on macOS)")
     args = parser.parse_args()
 
@@ -248,9 +203,9 @@ def main():
     print(f"Saved {args.output}")
 
     if args.render:
-        render(model, qpos, targets, fps, args.render)
+        visualize.render(model, qpos, targets, fps, args.render)
     if args.view:
-        view(model, qpos, targets, fps)
+        visualize.view(model, qpos, targets, fps, err)
 
 
 if __name__ == "__main__":

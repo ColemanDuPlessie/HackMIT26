@@ -24,9 +24,15 @@ uv run extract_keypoints.py input.mp4 -o keypoints.npz          # --model lite|f
 # 2. Landmarks -> MuJoCo qpos for humanoid.xml
 uv run retarget.py keypoints.npz -o motion.npz --render motion.mp4
 
-# Interactive playback (macOS needs mjpython for the viewer)
-uv run mjpython retarget.py keypoints.npz -o motion.npz --view
+# 3. Play back a saved pose file (macOS needs mjpython for the interactive viewer)
+uv run mjpython visualize.py motion.npz
+uv run visualize.py motion.npz --render motion.mp4          # headless video
+uv run visualize.py motion.npz --render frame.png --start 120  # single frame
 ```
+
+Viewer controls: **Space** pause/resume, **←/→** step a frame, **↑/↓** double/halve speed, **Home** restart.
+The overlay shows frame, time, speed and IK error. Other flags: `--speed`, `--no-targets`, `--no-follow`,
+`--model` (defaults to the model path saved in the file, falling back to `humanoid.xml`).
 
 `motion.npz` contains `qpos (T, nq)`, `targets (T, 33, 3)`, per-frame IK `error`, `fps`, and `joint_names`.
 Green spheres in the render/viewer are the IK targets.
@@ -38,6 +44,8 @@ Green spheres in the render/viewer are the IK targets.
 - `humanoid.xml`: simple humanoid (free root; ball joints at spine, neck, shoulders, wrists, hips, ankles;
   hinge elbows/knees). Sites `mp_<i>` mark where MediaPipe landmark `i` sits on the body.
 - `retarget.py`: axis conversion → smoothing → rescale skeleton to model bone lengths → foot grounding → per-frame IK.
+  `--render`/`--view` are shortcuts to `visualize.py`.
+- `visualize.py`: plays back a saved `motion.npz` in the MuJoCo viewer, or renders it to video/image.
 
 ## Using a different model
 
