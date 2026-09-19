@@ -31,6 +31,7 @@ import argparse
 import csv
 import io
 import math
+import random
 import shutil
 import subprocess
 import sys
@@ -114,6 +115,8 @@ def main() -> None:
     ap.add_argument("--genres", nargs="+", help="e.g. gBR gPO. Default: all 10")
     ap.add_argument("--max-len", type=float, default=20.0, help="max clip length in seconds")
     ap.add_argument("--workers", type=int, default=4)
+    ap.add_argument("--limit", type=int, help="download at most this many videos (a random sample)")
+    ap.add_argument("--seed", type=int, default=0, help="which random sample --limit takes")
     ap.add_argument("--keep-raw", action="store_true", help="keep downloaded videos after cutting")
     ap.add_argument("--dry-run", action="store_true", help="print what would be downloaded and exit")
     args = ap.parse_args()
@@ -125,6 +128,11 @@ def main() -> None:
     rows = [r for r in rows
             if (not args.cameras or r["CAMERA"] in args.cameras)
             and (not args.genres or r["GENRE"] in args.genres)]
+    if args.limit and len(rows) > args.limit:
+        # Sample rather than truncate: the list is ordered by genre/dancer, so the first N
+        # would all be the same genre.
+        rng = random.Random(args.seed)
+        rows = rng.sample(rows, args.limit)
     hours = sum(float(r["SEC"]) for r in rows) / 3600
     gb = sum(int(r["FILE_SIZE"]) for r in rows) / 1e9
     print(f"{len(rows)} videos, {hours:.1f} h, {gb:.1f} GB to download")
@@ -145,11 +153,18 @@ def main() -> None:
                 print(f"FAILED {name}: {e}", file=sys.stderr)
             print(f"[{i}/{len(rows)}] {name}", flush=True)
 
+    # Merge with any earlier run's rows: a run with different filters (or --limit) would
+    # otherwise drop clips that are still sitting in clips/.
+    existing = {}
+    if (ROOT / "manifest.csv").exists():
+        with open(ROOT / "manifest.csv", newline="") as f:
+            existing = {row["clip"]: row for row in csv.DictReader(f)}
+    existing.update({m["clip"]: m for m in manifest})
     with open(ROOT / "manifest.csv", "w", newline="") as f:
         w = csv.DictWriter(f, fieldnames=MANIFEST_FIELDS)
         w.writeheader()
-        w.writerows(sorted(manifest, key=lambda m: m["clip"]))
-    print(f"{len(manifest)} clips in {ROOT / 'clips'}; {len(failed)} videos failed"
+        w.writerows(sorted(existing.values(), key=lambda m: m["clip"]))
+    print(f"{len(existing)} clips in {ROOT / 'clips'}; {len(failed)} videos failed"
           + (" (rerun to retry)" if failed else ""))
 
 

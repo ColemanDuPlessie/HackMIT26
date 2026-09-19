@@ -81,12 +81,18 @@ def main():
     parser.add_argument("--out", type=Path, default=ROOT / "cache")
     parser.add_argument("--model", default="full", choices=["lite", "full", "heavy"])
     parser.add_argument("--workers", type=int, default=2, help="clips in parallel (each loads its own model)")
+    parser.add_argument("--limit", type=int, help="stop after preparing this many new clips")
     args = parser.parse_args()
 
     videos = sorted(p for p in args.clips.glob("*.mp4"))
     if not videos:
         sys.exit(f"No .mp4 clips in {args.clips}. Run dataset/download_aist.py first.")
     args.out.mkdir(parents=True, exist_ok=True)
+    if args.limit:  # prep is the slow half of the pipeline, so cap it per session
+        videos = [v for v in videos if not (args.out / f"{v.stem}.npz").exists()][: args.limit]
+        if not videos:
+            print("Every clip is already prepared.")
+            return
     print(f"Preparing {len(videos)} clips -> {args.out}")
 
     with ProcessPoolExecutor(max_workers=args.workers) as pool:

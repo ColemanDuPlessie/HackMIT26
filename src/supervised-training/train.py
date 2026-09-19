@@ -1,21 +1,30 @@
-"""Train the music -> motion model on prepared clips.
+"""Train the music -> motion model with a capped number of passes per clip, resumably.
+
+No clip is trained on more than --max-uses times, ever (5 by default). The checkpoint carries
+a ledger counting how often each clip has been used, so a later run continues where the last
+one stopped: least-used clips first, including clips prepared after the last run finished.
+The cap is what keeps a small dataset from being memorised by a comparatively large model.
 
 Usage:
-    uv run train.py                                  # cache/ -> checkpoints/model.pt
-    uv run train.py --epochs 200 --window 240 --batch 16 --device cuda
-    uv run train.py --smoke-test                     # 20 steps on random data, no dataset needed
+    uv run train.py --minutes 55                 # fresh run; stops at 55 min or when every clip hits the cap
+    uv run train.py --minutes 55                 # again later: resumes from the ledger, least-used clips first
+    uv run train.py --fresh                      # ignore an existing checkpoint and start over
+    uv run train.py --smoke-test                 # 20 steps on random data, no dataset needed
 
-Loss = position + velocity + acceleration, all on normalised coordinates:
-position alone gives motion that matches on average but jitters, because a small per-frame
-error looks fine in position and awful in velocity. The derivative terms are what make the
-output watchable, and are standard in the motion-generation literature.
+Clips are processed in shards (--shard-clips) so memory stays bounded; the checkpoint is
+written after each shard, and Ctrl-C saves before exiting. A shard interrupted mid-way is not
+counted, so its clips keep their old count and come round again.
 
-Input poses get Gaussian noise during training (--noise). The model is fed its own outputs
-at generation time, so training only on ground-truth inputs leaves it helpless once it drifts
-off the data manifold; noise is the cheap version of scheduled sampling.
+Outputs in --out:
+    checkpoint.pt   model + optimiser + ledger; what --resume reads
+    model.pt        final weights only, for generate.py / evaluate.py
+    best.pt         weights at the lowest validation loss so far
 """
 
 import argparse
+import json
+import math
+import signal
 import time
 from pathlib import Path
 
@@ -23,10 +32,19 @@ import numpy as np
 import torch
 from torch.utils.data import DataLoader
 
-from dataset import DanceWindows, Stats, load_clips, split_clips
+from dataset import DanceWindows, Stats, load_clips
 from model import ModelConfig, MotionTransformer
 
 ROOT = Path(__file__).resolve().parent
+# Config that must not change between runs: the ledger and optimiser state assume them.
+FROZEN = ("window", "batch", "lr", "warmup", "total_steps")
+
+
+def model_config(args) -> ModelConfig:
+    """Architecture for a fresh run. Cost scales ~ d_model^2 * layers, so these are the dials
+    for making a run fill a time budget when the dataset is too small to fill it by itself."""
+    return ModelConfig(d_model=args.d_model, n_layers=args.layers, n_heads=args.heads,
+                       d_ff=4 * args.d_model, max_len=max(args.window, 512))
 
 
 def shift_inputs(motion: torch.Tensor) -> torch.Tensor:
@@ -41,28 +59,227 @@ def motion_loss(pred: torch.Tensor, target: torch.Tensor, w_vel: float, w_acc: f
     return {"loss": pos + w_vel * vel + w_acc * acc, "pos": pos, "vel": vel, "acc": acc}
 
 
-def run_epoch(model, loader, cfg, optimiser=None, scheduler=None):
-    train = optimiser is not None
-    model.train(train)
+def lr_at(step: int, base: float, warmup: int, total: int, floor: float = 0.1) -> float:
+    """Linear warmup then cosine decay to `floor * base`, computed from the step alone.
+
+    Deriving it from the step rather than a scheduler object means resuming needs nothing
+    but the step count, and the shape survives a run that stops early.
+    """
+    if step < warmup:
+        return base * (step + 1) / warmup
+    progress = min(1.0, (step - warmup) / max(1, total - warmup))
+    return base * (floor + (1 - floor) * 0.5 * (1 + math.cos(math.pi * progress)))
+
+
+def fit_stats(cache: Path) -> Stats:
+    """Per-channel mean/std over every prepared clip, in one streaming pass (bounded memory).
+
+    Computed once, on the first run, and frozen in the checkpoint: later runs see different
+    clips, and normalisation that drifts between runs would invalidate the optimiser state.
+    """
+    sums = {}
+    for path in sorted(cache.glob("*.npz")):
+        with np.load(path) as z:
+            for key in ("audio", "motion"):
+                x = z[key].astype(np.float64)
+                if key not in sums:
+                    sums[key] = [np.zeros(x.shape[1]), np.zeros(x.shape[1]), 0]
+                sums[key][0] += x.sum(0)
+                sums[key][1] += (x ** 2).sum(0)
+                sums[key][2] += len(x)
+    out = {}
+    for key, (total, sq, n) in sums.items():
+        mean = total / n
+        out[key] = (mean, np.sqrt(np.maximum(sq / n - mean ** 2, 0)) + 1e-6)
+    return Stats(out["audio"][0], out["audio"][1], out["motion"][0], out["motion"][1])
+
+
+def evaluate(model, loader, args, device) -> dict:
+    model.eval()
     totals, n = {}, 0
-    for audio, motion in loader:
-        audio, motion = audio.to(cfg.device), motion.to(cfg.device)
-        prev = shift_inputs(motion)
-        if train and cfg.noise > 0:
-            prev = prev + cfg.noise * torch.randn_like(prev)
-        with torch.set_grad_enabled(train):
-            pred = model(prev, audio)
-            parts = motion_loss(pred, motion, cfg.w_vel, cfg.w_acc)
-        if train:
+    with torch.no_grad():
+        for audio, motion in loader:
+            audio, motion = audio.to(device), motion.to(device)
+            parts = motion_loss(model(shift_inputs(motion), audio), motion, args.w_vel, args.w_acc)
+            for k, v in parts.items():
+                totals[k] = totals.get(k, 0.0) + v.item() * len(audio)
+            n += len(audio)
+    return {k: v / max(1, n) for k, v in totals.items()}
+
+
+def save(path: Path, payload: dict):
+    """Write via a temporary file so an interrupted save can't corrupt the checkpoint."""
+    tmp = path.with_suffix(".tmp")
+    torch.save(payload, tmp)
+    tmp.replace(path)
+
+
+def slim(state: dict, model, stats, fps, val_clips) -> dict:
+    """The checkpoint format generate.py and evaluate.py expect: weights, config, stats."""
+    return {"model": model.state_dict(), "config": state["config"]["model"], "stats": stats.to_dict(),
+            "fps": fps, "val_clips": val_clips, "step": state["step"],
+            "clip_passes": sum(state["uses"].values())}
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    parser.add_argument("--cache", type=Path, default=ROOT / "cache")
+    parser.add_argument("--out", type=Path, default=ROOT / "checkpoints")
+    parser.add_argument("--minutes", type=float, default=55.0, help="wall-clock budget for this run")
+    parser.add_argument("--shard-clips", type=int, default=16, help="clips held in memory at once")
+    parser.add_argument("--window", type=int, default=240, help="frames per window (240 = 4 s at 60 fps)")
+    parser.add_argument("--stride", type=int, default=0,
+                        help="window start spacing; 0 = no overlap, so each frame is trained on once")
+    parser.add_argument("--batch", type=int, default=16)
+    parser.add_argument("--lr", type=float, default=3e-4)
+    parser.add_argument("--warmup", type=int, default=200)
+    parser.add_argument("--total-steps", type=int, default=20000,
+                        help="horizon the cosine decay is shaped for, across all runs")
+    parser.add_argument("--noise", type=float, default=0.02, help="input pose noise, in normalised units")
+    parser.add_argument("--w-vel", type=float, default=1.0, dest="w_vel")
+    parser.add_argument("--w-acc", type=float, default=0.5, dest="w_acc")
+    parser.add_argument("--clip-grad", type=float, default=1.0)
+    parser.add_argument("--val-clips", type=int, default=3, help="clips held out permanently (first run only)")
+    parser.add_argument("--max-uses", type=int, default=5,
+                        help="how often one clip may ever be trained on, across all runs")
+    parser.add_argument("--d-model", type=int, default=ModelConfig.d_model, dest="d_model")
+    parser.add_argument("--layers", type=int, default=ModelConfig.n_layers)
+    parser.add_argument("--heads", type=int, default=ModelConfig.n_heads)
+    parser.add_argument("--fresh", action="store_true", help="start over, ignoring any checkpoint")
+    parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else
+                                     "mps" if torch.backends.mps.is_available() else "cpu")
+    parser.add_argument("--smoke-test", action="store_true")
+    args = parser.parse_args()
+    args.stride = args.stride or args.window
+
+    if args.smoke_test:
+        smoke_test(args)
+        return
+
+    args.out.mkdir(parents=True, exist_ok=True)
+    ckpt_path = args.out / "checkpoint.pt"
+    device = args.device
+
+    clips_available = sorted(p.stem for p in args.cache.glob("*.npz"))
+    if not clips_available:
+        raise SystemExit(f"No prepared clips in {args.cache}; run prepare_data.py first.")
+
+    # ---------------------------------------------------------------- resume or start
+    if ckpt_path.exists() and not args.fresh:
+        state = torch.load(ckpt_path, map_location=device, weights_only=False)
+        stored = state["config"]["model"]
+        if (stored["d_model"], stored["n_layers"], stored["n_heads"]) != (args.d_model, args.layers, args.heads):
+            print(f"Note: keeping the checkpoint's architecture (d_model={stored['d_model']}, "
+                  f"layers={stored['n_layers']}, heads={stored['n_heads']}); --fresh to change it.")
+        for key in FROZEN:
+            if state["config"][key] != getattr(args, key):
+                raise SystemExit(f"--{key.replace('_', '-')} is {getattr(args, key)} but the checkpoint "
+                                 f"used {state['config'][key]}; pass the same value or --fresh.")
+        stats = Stats.from_dict(state["stats"])
+        used = state["uses"]
+        print(f"Resuming at step {state['step']}: {len(used)} clips used, "
+              f"{sum(used.values())} passes so far (cap {args.max_uses} each)")
+    else:
+        stats = fit_stats(args.cache)
+        # Held out by name, recorded in the checkpoint, and never trained on in any run.
+        val_names = clips_available[: args.val_clips]
+        state = {"config": {k: getattr(args, k) for k in FROZEN} | {"model": model_config(args).to_dict(),
+                                                                   "stride": args.stride},
+                 "stats": stats.to_dict(), "uses": {}, "val": val_names,
+                 "step": 0, "best_val": float("inf"), "history": []}
+        print(f"Fresh run. Held out {len(val_names)} clips for validation: {', '.join(val_names)}")
+
+    model = MotionTransformer(ModelConfig(**state["config"]["model"])).to(device)
+    optimiser = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=0.01)
+    if "model_state" in state:
+        model.load_state_dict(state["model_state"])
+        optimiser.load_state_dict(state["optimiser"])
+
+    # ---------------------------------------------------------------- data
+    val_clips = load_clips(args.cache, state["val"])
+    val_loader = DataLoader(DanceWindows(val_clips, stats, args.window, args.window), batch_size=args.batch)
+    fps = float(np.mean([c["fps"] for c in val_clips]))
+
+    uses = state["uses"]
+    held_out = set(state["val"])
+    # Least-used first, so every clip reaches the cap before any clip exceeds the others.
+    queue = sorted((n for n in clips_available if n not in held_out), key=lambda n: (uses.get(n, 0), n))
+    queue = [n for n in queue if uses.get(n, 0) < args.max_uses]
+    if not queue:
+        raise SystemExit(f"Every prepared clip has been used {args.max_uses} times. Prepare more "
+                         f"clips (prepare_data.py), raise --max-uses, or pass --fresh.")
+    budget = sum(args.max_uses - uses.get(n, 0) for n in queue)
+    print(f"{len(clips_available)} prepared, {len(queue)} below the cap ({budget} passes left) "
+          f"-> this run's budget: {args.minutes:.0f} min on {device}")
+
+    # ---------------------------------------------------------------- train
+    stop = {"now": False}
+    signal.signal(signal.SIGINT, lambda *_: stop.update(now=True))
+    deadline = time.time() + args.minutes * 60
+    run = {"started": time.time(), "steps": 0, "clips": 0, "loss": None}
+
+    for start in range(0, len(queue), args.shard_clips):
+        if stop["now"] or time.time() >= deadline:
+            break
+        names = queue[start : start + args.shard_clips]
+        shard = load_clips(args.cache, names)
+        loader = DataLoader(DanceWindows(shard, stats, args.window, args.stride),
+                            batch_size=args.batch, shuffle=True, drop_last=False)
+
+        model.train()
+        losses = []
+        for audio, motion in loader:
+            if stop["now"] or time.time() >= deadline:
+                break
+            audio, motion = audio.to(device), motion.to(device)
+            prev = shift_inputs(motion)
+            if args.noise > 0:
+                prev = prev + args.noise * torch.randn_like(prev)
+            parts = motion_loss(model(prev, audio), motion, args.w_vel, args.w_acc)
+            for group in optimiser.param_groups:
+                group["lr"] = lr_at(state["step"], args.lr, args.warmup, args.total_steps)
             optimiser.zero_grad(set_to_none=True)
             parts["loss"].backward()
-            torch.nn.utils.clip_grad_norm_(model.parameters(), cfg.clip)
+            torch.nn.utils.clip_grad_norm_(model.parameters(), args.clip_grad)
             optimiser.step()
-            scheduler.step()
-        for k, v in parts.items():
-            totals[k] = totals.get(k, 0.0) + v.item() * len(audio)
-        n += len(audio)
-    return {k: v / n for k, v in totals.items()}
+            state["step"] += 1
+            run["steps"] += 1
+            losses.append(parts["loss"].item())
+        else:
+            # Only a shard trained to the end is counted, so an interrupted shard isn't charged a pass.
+            for name in names:
+                uses[name] = uses.get(name, 0) + 1
+            run["clips"] += len(names)
+
+        val = evaluate(model, val_loader, args, device)
+        run["loss"] = float(np.mean(losses)) if losses else run["loss"]
+        left = max(0.0, deadline - time.time()) / 60
+        print(f"step {state['step']:6d}  passes {sum(uses.values()):5d}  "
+              f"train {run['loss']:.4f}  val {val['loss']:.4f}  {left:.0f} min left")
+
+        state["model_state"] = model.state_dict()
+        state["optimiser"] = optimiser.state_dict()
+        save(ckpt_path, state)
+        save(args.out / "model.pt", slim(state, model, stats, fps, state["val"]))
+        if val["loss"] < state["best_val"]:
+            state["best_val"] = val["loss"]
+            save(args.out / "best.pt", slim(state, model, stats, fps, state["val"]))
+
+    # ---------------------------------------------------------------- finish
+    minutes = (time.time() - run["started"]) / 60
+    state["history"].append({"minutes": round(minutes, 1), "steps": run["steps"],
+                             "passes": run["clips"], "final_train_loss": run["loss"],
+                             "best_val": state["best_val"], "ended": time.strftime("%Y-%m-%d %H:%M")})
+    save(ckpt_path, state)
+    save(args.out / "model.pt", slim(state, model, stats, fps, state["val"]))
+    remaining = sum(args.max_uses - u for u in
+                    (uses.get(n, 0) for n in clips_available if n not in held_out))
+    print(f"\n{'Interrupted' if stop['now'] else 'Done'} after {minutes:.1f} min: "
+          f"{run['steps']} steps over {run['clips']} clip passes "
+          f"({sum(uses.values())} total; {remaining} passes still allowed under the cap).")
+    print(f"Final model: {args.out / 'model.pt'}  best val: {state['best_val']:.4f} "
+          f"({args.out / 'best.pt'})")
+    print(f"Resume with the same command; history: {json.dumps(state['history'][-1])}")
 
 
 def smoke_test(args):
@@ -85,65 +302,10 @@ def smoke_test(args):
     params = sum(p.numel() for p in model.parameters())
     print(f"loss {first:.4f} -> {last:.4f} over 20 steps ({params/1e6:.2f}M params)")
     print(f"rollout {tuple(rollout.shape)} finite={bool(torch.isfinite(rollout).all())}")
+    print(f"lr schedule: {[round(lr_at(s, 3e-4, 200, 20000), 6) for s in (0, 199, 1000, 20000)]}")
     assert rollout.shape == (1, 64, cfg.motion_dim) and torch.isfinite(rollout).all()
     assert last < first, "loss did not go down"
     print("smoke test passed")
-
-
-def main():
-    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--cache", type=Path, default=ROOT / "cache")
-    parser.add_argument("--out", type=Path, default=ROOT / "checkpoints")
-    parser.add_argument("--window", type=int, default=240, help="frames per window (240 = 4 s at 60 fps)")
-    parser.add_argument("--stride", type=int, default=30)
-    parser.add_argument("--batch", type=int, default=16)
-    parser.add_argument("--epochs", type=int, default=100)
-    parser.add_argument("--lr", type=float, default=3e-4)
-    parser.add_argument("--noise", type=float, default=0.02, help="input pose noise, in normalised units")
-    parser.add_argument("--w-vel", type=float, default=1.0, dest="w_vel")
-    parser.add_argument("--w-acc", type=float, default=0.5, dest="w_acc")
-    parser.add_argument("--clip", type=float, default=1.0)
-    parser.add_argument("--holdout", type=float, default=0.15)
-    parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else
-                                     "mps" if torch.backends.mps.is_available() else "cpu")
-    parser.add_argument("--smoke-test", action="store_true")
-    args = parser.parse_args()
-
-    if args.smoke_test:
-        smoke_test(args)
-        return
-
-    clips = load_clips(args.cache)
-    train_clips, val_clips = split_clips(clips, args.holdout)
-    stats = Stats.fit(train_clips)
-    train_set = DanceWindows(train_clips, stats, args.window, args.stride)
-    val_set = DanceWindows(val_clips, stats, args.window, args.window)
-    print(f"{len(clips)} clips -> {len(train_set)} train / {len(val_set)} val windows on {args.device}")
-
-    train_loader = DataLoader(train_set, batch_size=args.batch, shuffle=True, drop_last=True)
-    val_loader = DataLoader(val_set, batch_size=args.batch)
-
-    cfg = ModelConfig(max_len=max(args.window, 512))
-    model = MotionTransformer(cfg).to(args.device)
-    optimiser = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=0.01)
-    scheduler = torch.optim.lr_scheduler.OneCycleLR(
-        optimiser, max_lr=args.lr, total_steps=args.epochs * max(1, len(train_loader)))
-
-    args.out.mkdir(parents=True, exist_ok=True)
-    best = float("inf")
-    for epoch in range(1, args.epochs + 1):
-        t0 = time.time()
-        tr = run_epoch(model, train_loader, args, optimiser, scheduler)
-        va = run_epoch(model, val_loader, args)
-        print(f"epoch {epoch:3d}  train {tr['loss']:.4f} (pos {tr['pos']:.4f} vel {tr['vel']:.4f})"
-              f"  val {va['loss']:.4f}  {time.time() - t0:.1f}s")
-        if va["loss"] < best:
-            best = va["loss"]
-            torch.save({"model": model.state_dict(), "config": cfg.to_dict(),
-                        "stats": stats.to_dict(), "fps": float(np.mean([c["fps"] for c in clips])),
-                        "val_loss": best, "val_clips": [c["name"] for c in val_clips]},
-                       args.out / "model.pt")
-            print(f"  saved {args.out / 'model.pt'} (val {best:.4f})")
 
 
 if __name__ == "__main__":

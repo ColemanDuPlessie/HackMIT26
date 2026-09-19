@@ -36,11 +36,55 @@ checkpoints/model.pt         weights + normalisation stats + held-out clip names
 cd src/supervised-training
 uv sync
 uv run train.py --smoke-test        # no dataset needed: checks shapes and that loss falls
-uv run prepare_data.py              # the slow step: MediaPipe over every clip
-uv run train.py --epochs 100
+./run_session.sh                    # one ~1 h session: download -> prepare -> train
+```
+
+Or the stages by hand:
+
+```bash
+python3 ../../dataset/download_aist.py --situations sBM --cameras c01 --limit 600
+uv run prepare_data.py --workers 4 --model lite     # the slow step
+uv run train.py --minutes 55 --max-uses 5
 uv run evaluate.py --baselines
 uv run generate.py some_song.mp3 --retarget danced_motion.npz
 ```
+
+## Running a session
+
+`train.py` is built around a budget and a ledger rather than epochs:
+
+- **`--minutes`** caps wall-clock time. The run stops cleanly at the cap, after the current
+  shard, and Ctrl-C does the same.
+- **`--max-uses`** (5) caps how often a clip may *ever* be trained on. The checkpoint counts
+  each clip's passes, and every run takes the least-used clips first, so the dataset is
+  consumed evenly and nothing is over-trained.
+- **Resuming is the default.** Re-running the same command continues from
+  `checkpoints/checkpoint.pt`: same step count, same optimiser state, same LR schedule,
+  same held-out validation clips, and it automatically picks up clips prepared since.
+  `--fresh` starts over. The learning rate is derived from the global step
+  (warmup then cosine toward `--total-steps`), so a run that stops early doesn't distort it.
+- **Outputs:** `checkpoint.pt` (resumable, includes optimiser + ledger), `model.pt` (the final
+  weights, what `generate.py` and `evaluate.py` read) and `best.pt` (best validation loss).
+
+Training stops early once every prepared clip has hit the cap. That's the normal outcome
+here, not an error: prepare more clips, or raise `--max-uses`.
+
+### Where an hour actually goes
+
+Measured on an M-series laptop (MPS), default model, 16 s clips at 60 fps:
+
+| Stage | Rate | 600 clips |
+|---|---|---|
+| Download (`c01` solo) | ~16 MB/clip | ~5 GB |
+| MediaPipe prep | ~5 s/clip (2 workers), ~3 s (4) | 30-50 min |
+| Training, 5 passes/clip | ~0.25 s/clip (80 windows/s) | **~2.5 min** |
+
+Preprocessing dominates; the GPU is not the constraint. All of AIST's solo front-camera
+footage (~1,700 clips) is about 7 minutes of training at the default size. So to spend an
+hour on *compute* rather than data, either enlarge the model (`--d-model 768 --layers 12` is
+~8x the cost, ~85M params) or overlap windows (`--stride 120` doubles the steps per clip).
+Both trade against overfitting on a dataset this small, which is exactly what `--max-uses`
+and the permanently held-out validation clips exist to expose.
 
 ## Representation
 
@@ -62,7 +106,8 @@ Roughly in the order they'll bite:
 
 1. **Data volume.** AIST++ baselines train on tens of hours. A handful of clips will overfit
    within minutes; hold out whole *songs* (the `mXXX` field of the clip name), not just clips,
-   or the model can memorise a soundtrack it will be tested on.
+   or the model can memorise a soundtrack it will be tested on. `train.py` currently holds out
+   the first `--val-clips` clips by name, which is weaker than that.
 2. **Autoregressive drift.** Feeding the model its own output compounds error, and dances tend
    to decay toward a mean pose after a few seconds. `--noise` mitigates it; a diffusion or
    VQ-VAE formulation (EDGE, Bailando) removes it properly, and is the upgrade I'd make first

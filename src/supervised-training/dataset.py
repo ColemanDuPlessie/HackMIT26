@@ -49,14 +49,21 @@ class Stats:
                        ("audio_mean", "audio_std", "motion_mean", "motion_std")))
 
 
-def load_clips(cache_dir: Path) -> list[dict]:
+def load_clips(cache_dir: Path, names: list[str] | None = None) -> list[dict]:
+    """Prepared clips, optionally only the named ones (a shard, rather than the whole cache)."""
+    wanted = set(names) if names is not None else None
     clips = []
     for path in sorted(Path(cache_dir).glob("*.npz")):
+        if wanted is not None and path.stem not in wanted:
+            continue
         with np.load(path) as z:
             clips.append({"name": path.stem, "audio": z["audio"], "motion": z["motion"],
                           "fps": float(z["fps"])})
     if not clips:
         raise FileNotFoundError(f"No prepared clips in {cache_dir}; run prepare_data.py first.")
+    if wanted is not None and len(clips) != len(wanted):
+        missing = wanted - {c["name"] for c in clips}
+        raise FileNotFoundError(f"Missing prepared clips: {', '.join(sorted(missing))}")
     return clips
 
 
