@@ -2,6 +2,10 @@ import numpy as np
 from pathlib import Path
 
 
+# Z contributes 30% less than X and Y
+AXIS_WEIGHTS = np.array([1.0, 1.0, 0.7])
+
+
 # MediaPipe joint indices
 LEFT_SHOULDER = 11
 RIGHT_SHOULDER = 12
@@ -36,28 +40,46 @@ ANGLE_JOINTS = {
 # Calibration from the intentionally bad example
 BAD_TARGET_SCORE = 0.30
 
+# These were measured before Z downweighting.
+# We should update position and trajectory values after rerunning.
 POSITION_BAD_ERROR = 0.10640327391349057
 ANGLE_BAD_ERROR = 10.483409009823326
 TRAJECTORY_BAD_ERROR = 0.040978255094918876
 
 
 POSITION_SCALE = (
-    -POSITION_BAD_ERROR / np.log(BAD_TARGET_SCORE)
+    -POSITION_BAD_ERROR
+    / np.log(BAD_TARGET_SCORE)
 )
 
 ANGLE_SCALE = (
-    -ANGLE_BAD_ERROR / np.log(BAD_TARGET_SCORE)
+    -ANGLE_BAD_ERROR
+    / np.log(BAD_TARGET_SCORE)
 )
 
 TRAJECTORY_SCALE = (
-    -TRAJECTORY_BAD_ERROR / np.log(BAD_TARGET_SCORE)
+    -TRAJECTORY_BAD_ERROR
+    / np.log(BAD_TARGET_SCORE)
 )
 
 
-# Small errors are tolerated before score starts dropping
+# Small errors are tolerated before the score starts dropping
 POSITION_TOLERANCE = 0.03
 ANGLE_TOLERANCE = 5.0
 TRAJECTORY_TOLERANCE = 0.01
+
+
+def weighted_xyz_norm(vectors):
+    """
+    Calculate XYZ distance while making Z count 30% less.
+    """
+
+    weighted_vectors = vectors * AXIS_WEIGHTS
+
+    return np.linalg.norm(
+        weighted_vectors,
+        axis=-1
+    )
 
 
 def calculate_angle(point_a, point_b, point_c):
@@ -111,15 +133,15 @@ def get_joint_angles(poses):
 
 def get_joint_weights(reference):
 
-    # How much each joint moves in the reference dance
+    # Movement from one frame to the next
     reference_motion = np.diff(
         reference,
         axis=0
     )
 
-    movement_amount = np.linalg.norm(
-        reference_motion,
-        axis=2
+    # Z is downweighted here too
+    movement_amount = weighted_xyz_norm(
+        reference_motion
     )
 
     joint_activity = np.mean(
@@ -175,9 +197,13 @@ def position_similarity(reference, generated):
         reference
     )
 
-    distances = np.linalg.norm(
-        reference - generated,
-        axis=2
+    differences = (
+        reference - generated
+    )
+
+    # X and Y full strength, Z at 70%
+    distances = weighted_xyz_norm(
+        differences
     )
 
     position_error = np.average(
@@ -188,7 +214,6 @@ def position_similarity(reference, generated):
         )
     )
 
-    # Ignore very small position errors
     effective_error = max(
         0.0,
         position_error
@@ -225,7 +250,6 @@ def angle_similarity(reference, generated):
         angle_errors
     )
 
-    # Ignore very small angle differences
     effective_error = max(
         0.0,
         angle_error
@@ -261,7 +285,6 @@ def trajectory_similarity(reference, generated):
             f"{reference.shape} vs {generated.shape}"
         )
 
-    # Movement between frames
     reference_motion = np.diff(
         reference,
         axis=0
@@ -272,11 +295,14 @@ def trajectory_similarity(reference, generated):
         axis=0
     )
 
-    # Difference in movement vectors
-    motion_errors = np.linalg.norm(
+    motion_difference = (
         reference_motion
-        - generated_motion,
-        axis=2
+        - generated_motion
+    )
+
+    # Z movement contributes 30% less
+    motion_errors = weighted_xyz_norm(
+        motion_difference
     )
 
     joint_weights = get_joint_weights(
@@ -291,7 +317,6 @@ def trajectory_similarity(reference, generated):
         )
     )
 
-    # Ignore tiny movement differences
     effective_error = max(
         0.0,
         trajectory_error
@@ -346,7 +371,7 @@ def align_timing(
     best_reference = reference
     best_generated = generated
 
-    # Try shifting the player early/late
+    # Try moving the player earlier/later
     for shift in range(
         -max_shift_frames,
         max_shift_frames + 1
@@ -369,9 +394,13 @@ def align_timing(
             ref_part = reference
             gen_part = generated
 
-        distances = np.linalg.norm(
-            ref_part - gen_part,
-            axis=2
+        differences = (
+            ref_part - gen_part
+        )
+
+        # Z matters less when finding best timing alignment too
+        distances = weighted_xyz_norm(
+            differences
         )
 
         error = np.average(
@@ -394,7 +423,7 @@ def align_timing(
         abs(best_shift) / fps
     )
 
-    # Still temporary until we calibrate timing
+    # Still temporary until timing is calibrated
     timing_similarity = (
         1
         / (1 + timing_error_seconds)
@@ -466,7 +495,6 @@ def dance_similarity(
     )
 
     return {
-
         "final_score":
             final_score,
 
@@ -536,6 +564,11 @@ if __name__ == "__main__":
     print(
         "FPS:",
         fps
+    )
+
+    print(
+        "XYZ weights:",
+        AXIS_WEIGHTS
     )
 
 
