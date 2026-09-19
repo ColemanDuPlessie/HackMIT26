@@ -1,394 +1,386 @@
-from pathlib import Path
-import argparse
 import numpy as np
+from pathlib import Path
 
 
-# Each triplet is (point A, vertex B, point C).
-# These indices assume the MediaPipe 33-landmark layout.
+# MediaPipe joint indices
+LEFT_SHOULDER = 11
+RIGHT_SHOULDER = 12
+LEFT_ELBOW = 13
+RIGHT_ELBOW = 14
+LEFT_WRIST = 15
+RIGHT_WRIST = 16
+
+LEFT_HIP = 23
+RIGHT_HIP = 24
+LEFT_KNEE = 25
+RIGHT_KNEE = 26
+LEFT_ANKLE = 27
+RIGHT_ANKLE = 28
+
+
 ANGLE_JOINTS = {
-    "left_elbow": (11, 13, 15),
-    "right_elbow": (12, 14, 16),
-    "left_shoulder": (13, 11, 23),
-    "right_shoulder": (14, 12, 24),
-    "left_knee": (23, 25, 27),
-    "right_knee": (24, 26, 28),
-    "left_hip": (11, 23, 25),
-    "right_hip": (12, 24, 26),
+    "left_elbow": (LEFT_SHOULDER, LEFT_ELBOW, LEFT_WRIST),
+    "right_elbow": (RIGHT_SHOULDER, RIGHT_ELBOW, RIGHT_WRIST),
+
+    "left_shoulder": (LEFT_ELBOW, LEFT_SHOULDER, LEFT_HIP),
+    "right_shoulder": (RIGHT_ELBOW, RIGHT_SHOULDER, RIGHT_HIP),
+
+    "left_knee": (LEFT_HIP, LEFT_KNEE, LEFT_ANKLE),
+    "right_knee": (RIGHT_HIP, RIGHT_KNEE, RIGHT_ANKLE),
+
+    "left_hip": (LEFT_SHOULDER, LEFT_HIP, LEFT_KNEE),
+    "right_hip": (RIGHT_SHOULDER, RIGHT_HIP, RIGHT_KNEE)
 }
 
-EXAMPLES_DIR = Path(__file__).resolve().parents[1] / "examples"
 
+# Calibration values from our intentionally bad example
+BAD_TARGET_SCORE = 0.30
 
-def validate_poses(poses):
-    """Require XYZ joint positions shaped (frames, 33, 3)."""
-    poses = np.asarray(poses, dtype=float)
+POSITION_BAD_ERROR = 0.10640327391349057
+ANGLE_BAD_ERROR = 10.483409009823326
+TRAJECTORY_BAD_ERROR = 0.040978255094918876
 
-    if poses.ndim != 3 or poses.shape[1:] != (33, 3):
-        raise ValueError(
-            f"Expected (frames, 33, 3), received {poses.shape}. "
-            "A different skeleton layout or vector format "
-            "must be converted before scoring."
-        )
-
-    if len(poses) == 0:
-        raise ValueError("The motion contains no frames.")
-
-    # A joint is missing if any coordinate is NaN or infinite.
-    poses = poses.copy()
-    valid_joints = np.all(np.isfinite(poses), axis=2)
-    poses[~valid_joints] = np.nan
-
-    return poses
-
-
-def validate_pair(reference, generated):
-    reference = validate_poses(reference)
-    generated = validate_poses(generated)
-
-    if reference.shape != generated.shape:
-        raise ValueError(
-            f"Shapes differ: {reference.shape} vs {generated.shape}. "
-            "The current scorer requires matching frame counts "
-            "and corresponding frame timing."
-        )
-
-    return reference, generated
+POSITION_SCALE = -POSITION_BAD_ERROR / np.log(BAD_TARGET_SCORE)
+ANGLE_SCALE = -ANGLE_BAD_ERROR / np.log(BAD_TARGET_SCORE)
+TRAJECTORY_SCALE = -TRAJECTORY_BAD_ERROR / np.log(BAD_TARGET_SCORE)
 
 
 def calculate_angle(point_a, point_b, point_c):
-    """Return the angle at point B in degrees."""
-    points = np.asarray(
-        [point_a, point_b, point_c],
-        dtype=float,
-    )
+    vector_1 = point_a - point_b
+    vector_2 = point_c - point_b
 
-    if points.shape != (3, 3):
-        raise ValueError("Each point must have three coordinates.")
+    denominator = np.linalg.norm(vector_1) * np.linalg.norm(vector_2)
 
-    if not np.all(np.isfinite(points)):
+    if denominator == 0:
         return np.nan
 
-    vector_1 = points[0] - points[1]
-    vector_2 = points[2] - points[1]
-
-    length_1 = np.linalg.norm(vector_1)
-    length_2 = np.linalg.norm(vector_2)
-
-    if length_1 <= 1e-12 or length_2 <= 1e-12:
-        return np.nan
-
-    cosine = np.dot(
-        vector_1 / length_1,
-        vector_2 / length_2,
-    )
-
+    cosine = np.dot(vector_1, vector_2) / denominator
     cosine = np.clip(cosine, -1.0, 1.0)
 
-    return float(np.degrees(np.arccos(cosine)))
+    angle = np.arccos(cosine)
+
+    return np.degrees(angle)
 
 
 def get_joint_angles(poses):
-    """Return eight joint angles per frame."""
-    poses = validate_poses(poses)
+    all_angles = []
 
-    angles = np.full(
-        (len(poses), len(ANGLE_JOINTS)),
-        np.nan,
-    )
+    for frame in poses:
+        frame_angles = []
 
-    for frame_index, frame in enumerate(poses):
-        for angle_index, (a, b, c) in enumerate(
-            ANGLE_JOINTS.values()
-        ):
-            angles[frame_index, angle_index] = calculate_angle(
+        for name, (a, b, c) in ANGLE_JOINTS.items():
+            angle = calculate_angle(
                 frame[a],
                 frame[b],
-                frame[c],
+                frame[c]
             )
 
-    return angles
+            frame_angles.append(angle)
+
+        all_angles.append(frame_angles)
+
+    return np.array(all_angles)
 
 
-def angle_metrics(reference, generated):
-    reference, generated = validate_pair(reference, generated)
+def get_joint_weights(reference):
+    # See which joints move the most in the reference dance
+    reference_motion = np.diff(reference, axis=0)
 
-    reference_angles = get_joint_angles(reference)
-    generated_angles = get_joint_angles(generated)
-
-    valid = (
-        np.isfinite(reference_angles)
-        & np.isfinite(generated_angles)
+    movement_amount = np.linalg.norm(
+        reference_motion,
+        axis=2
     )
 
-    if not np.any(valid):
-        raise ValueError("No valid matching angles were found.")
-
-    errors = np.abs(
-        reference_angles[valid] - generated_angles[valid]
+    joint_activity = np.mean(
+        movement_amount,
+        axis=0
     )
 
-    mean_error = float(np.mean(errors))
-    score = float(np.clip(1 - mean_error / 180, 0.0, 1.0))
+    if np.max(joint_activity) > 0:
+        normalized_activity = (
+            joint_activity / np.max(joint_activity)
+        )
+    else:
+        normalized_activity = np.zeros_like(joint_activity)
 
-    return {
-        "score": score,
-        "mean_error_degrees": mean_error,
-        "coverage": float(np.mean(valid)),
-    }
+    # Every joint matters, but active joints matter more
+    BASE_WEIGHT = 1.0
+    ACTIVITY_WEIGHT = 1.0
+
+    return BASE_WEIGHT + ACTIVITY_WEIGHT * normalized_activity
+
+
+def position_similarity(reference, generated):
+    reference = np.asarray(reference, dtype=float)
+    generated = np.asarray(generated, dtype=float)
+
+    if reference.shape != generated.shape:
+        raise ValueError(
+            f"Shape mismatch: {reference.shape} vs {generated.shape}"
+        )
+
+    joint_weights = get_joint_weights(reference)
+
+    distances = np.linalg.norm(
+        reference - generated,
+        axis=2
+    )
+
+    position_error = np.average(
+        distances,
+        weights=np.broadcast_to(
+            joint_weights,
+            distances.shape
+        )
+    )
+
+    # Exponential scaling based on our calibration example
+    similarity = np.exp(
+        -position_error / POSITION_SCALE
+    )
+
+    return similarity, position_error
 
 
 def angle_similarity(reference, generated):
-    return angle_metrics(reference, generated)["score"]
+    reference_angles = get_joint_angles(reference)
+    generated_angles = get_joint_angles(generated)
+
+    angle_errors = np.abs(
+        reference_angles - generated_angles
+    )
+
+    angle_error = np.nanmean(angle_errors)
+
+    similarity = np.exp(
+        -angle_error / ANGLE_SCALE
+    )
+
+    return similarity, angle_error
 
 
-def position_metrics(reference, generated, distance_scale=1.0):
-    reference, generated = validate_pair(reference, generated)
+def trajectory_similarity(reference, generated):
+    reference = np.asarray(reference, dtype=float)
+    generated = np.asarray(generated, dtype=float)
 
-    if not np.isfinite(distance_scale) or distance_scale <= 0:
+    if reference.shape != generated.shape:
         raise ValueError(
-            "distance_scale must be finite and greater than zero."
+            f"Shape mismatch: {reference.shape} vs {generated.shape}"
         )
 
-    joint_activity = np.zeros(reference.shape[1])
+    # Compare frame-to-frame movement
+    reference_motion = np.diff(reference, axis=0)
+    generated_motion = np.diff(generated, axis=0)
 
-    # With one frame, movement cannot be measured.
-    # In that case, every joint gets equal weight.
-    if len(reference) > 1:
-        reference_motion = np.diff(reference, axis=0)
-        movement_amount = np.linalg.norm(reference_motion, axis=2)
+    motion_errors = np.linalg.norm(
+        reference_motion - generated_motion,
+        axis=2
+    )
 
-        valid_motion = np.isfinite(movement_amount)
+    joint_weights = get_joint_weights(reference)
 
-        totals = np.sum(
-            np.where(valid_motion, movement_amount, 0.0),
-            axis=0,
-        )
-        counts = np.sum(valid_motion, axis=0)
-
-        np.divide(
-            totals,
-            counts,
-            out=joint_activity,
-            where=counts > 0,
-        )
-
-    maximum_activity = np.max(joint_activity)
-
-    if maximum_activity > 0:
-        joint_activity = joint_activity / maximum_activity
-
-    # Weights range from 1 to 2.
-    joint_weights = 1.0 + joint_activity
-
-    distances = np.linalg.norm(reference - generated, axis=2)
-    valid = np.isfinite(distances)
-
-    if not np.any(valid):
-        raise ValueError("No valid matching positions were found.")
-
-    weights = np.broadcast_to(joint_weights, distances.shape)
-
-    mean_distance = float(
-        np.average(
-            distances[valid],
-            weights=weights[valid],
+    trajectory_error = np.average(
+        motion_errors,
+        weights=np.broadcast_to(
+            joint_weights,
+            motion_errors.shape
         )
     )
 
-    # distance_scale uses the same units as the input coordinates.
-    score = float(1 / (1 + mean_distance / distance_scale))
+    similarity = np.exp(
+        -trajectory_error / TRAJECTORY_SCALE
+    )
 
-    return {
-        "score": score,
-        "mean_distance": mean_distance,
-        "coverage": float(np.mean(valid)),
-    }
+    return similarity, trajectory_error
 
 
-def position_similarity(reference, generated, distance_scale=1.0):
-    return position_metrics(
+def align_timing(
+    reference,
+    generated,
+    fps,
+    max_shift_seconds=1.0
+):
+    reference = np.asarray(reference, dtype=float)
+    generated = np.asarray(generated, dtype=float)
+
+    max_shift_frames = int(max_shift_seconds * fps)
+
+    max_shift_frames = min(
+        max_shift_frames,
+        len(reference) - 1,
+        len(generated) - 1
+    )
+
+    joint_weights = get_joint_weights(reference)
+
+    best_error = np.inf
+    best_shift = 0
+
+    best_reference = reference
+    best_generated = generated
+
+    # Try different global timing shifts
+    for shift in range(
+        -max_shift_frames,
+        max_shift_frames + 1
+    ):
+
+        if shift > 0:
+            ref_part = reference[:-shift]
+            gen_part = generated[shift:]
+
+        elif shift < 0:
+            amount = -shift
+
+            ref_part = reference[amount:]
+            gen_part = generated[:-amount]
+
+        else:
+            ref_part = reference
+            gen_part = generated
+
+        distances = np.linalg.norm(
+            ref_part - gen_part,
+            axis=2
+        )
+
+        error = np.average(
+            distances,
+            weights=np.broadcast_to(
+                joint_weights,
+                distances.shape
+            )
+        )
+
+        if error < best_error:
+            best_error = error
+            best_shift = shift
+            best_reference = ref_part
+            best_generated = gen_part
+
+    timing_error_seconds = abs(best_shift) / fps
+
+    # Still temporary until we have timing calibration examples
+    timing_similarity = 1 / (
+        1 + timing_error_seconds
+    )
+
+    return (
+        best_reference,
+        best_generated,
+        timing_similarity,
+        best_shift,
+        timing_error_seconds
+    )
+
+
+def dance_similarity(reference, generated, fps):
+
+    (
+        aligned_reference,
+        aligned_generated,
+        timing_score,
+        shift,
+        timing_error
+    ) = align_timing(
         reference,
         generated,
-        distance_scale,
-    )["score"]
+        fps
+    )
 
+    position_score, position_error = position_similarity(
+        aligned_reference,
+        aligned_generated
+    )
 
-def inspect_files(folder):
-    """Print every NPZ filename and its array names and shapes."""
-    folder = Path(folder)
+    angle_score, angle_error = angle_similarity(
+        aligned_reference,
+        aligned_generated
+    )
 
-    if not folder.is_dir():
-        print(f"Examples folder does not exist: {folder}")
-        return
+    trajectory_score, trajectory_error = trajectory_similarity(
+        aligned_reference,
+        aligned_generated
+    )
 
-    paths = sorted(folder.rglob("*.npz"))
+    # Equal weights for now
+    position_weight = 0.25
+    angle_weight = 0.25
+    trajectory_weight = 0.25
+    timing_weight = 0.25
 
-    if not paths:
-        print(f"No .npz files found in: {folder}")
-        return
+    # Weighted geometric mean
+    final_score = (
+        (position_score ** position_weight)
+        * (angle_score ** angle_weight)
+        * (trajectory_score ** trajectory_weight)
+        * (timing_score ** timing_weight)
+    )
 
-    print(f"Found {len(paths)} NPZ file(s).")
-
-    for path in paths:
-        print(f"\nFile: {path.name}")
-
-        try:
-            with np.load(path, allow_pickle=False) as data:
-                if not data.files:
-                    print("  This archive contains no arrays.")
-
-                for key in data.files:
-                    try:
-                        array = data[key]
-                        print(
-                            f"  Key: {key!r}\n"
-                            f"  Shape: {array.shape}\n"
-                            f"  Type: {array.dtype}"
-                        )
-                    except ValueError as error:
-                        print(f"  Key {key!r}: {error}")
-
-        except (OSError, ValueError) as error:
-            print(f"  Could not read file: {error}")
-
-
-def load_motion(path, key=None):
-    """Load a selected array without guessing among multiple keys."""
-    path = Path(path)
-
-    with np.load(path, allow_pickle=False) as data:
-        if key is None:
-            if len(data.files) != 1:
-                raise ValueError(
-                    f"{path.name} contains these keys: {data.files}. "
-                    "Specify the appropriate --reference-key, "
-                    "--best-key, or --worst-key."
-                )
-
-            key = data.files[0]
-
-        if key not in data.files:
-            raise ValueError(
-                f"Key {key!r} not found in {path.name}. "
-                f"Available keys: {data.files}"
-            )
-
-        poses = data[key].copy()
-
-    return validate_poses(poses)
-
-
-def evaluate(reference, generated, distance_scale):
     return {
-        "angles": angle_metrics(reference, generated),
-        "positions": position_metrics(
-            reference,
-            generated,
-            distance_scale,
-        ),
+        "final_score": final_score,
+
+        "position_score": position_score,
+        "position_error": position_error,
+
+        "angle_score": angle_score,
+        "angle_error_degrees": angle_error,
+
+        "trajectory_score": trajectory_score,
+        "trajectory_error": trajectory_error,
+
+        "timing_score": timing_score,
+        "timing_shift_frames": shift,
+        "timing_error_seconds": timing_error
     }
-
-
-def print_results(label, results):
-    angles = results["angles"]
-    positions = results["positions"]
-
-    print(f"\n{label}")
-    print(f"  Angle score:          {angles['score']:.4f}")
-    print(
-        f"  Mean angle error:     "
-        f"{angles['mean_error_degrees']:.2f} degrees"
-    )
-    print(f"  Valid angle coverage: {angles['coverage']:.1%}")
-    print(f"  Position score:       {positions['score']:.4f}")
-    print(f"  Mean position error:  {positions['mean_distance']:.6f}")
-    print(f"  Valid joint coverage: {positions['coverage']:.1%}")
-
-
-def main():
-    parser = argparse.ArgumentParser(
-        description="Inspect NPZ files or compare dance motions."
-    )
-
-    parser.add_argument(
-        "--examples",
-        type=Path,
-        default=EXAMPLES_DIR,
-    )
-
-    parser.add_argument("--reference", type=Path)
-    parser.add_argument("--best", type=Path)
-    parser.add_argument("--worst", type=Path)
-
-    parser.add_argument("--reference-key")
-    parser.add_argument("--best-key")
-    parser.add_argument("--worst-key")
-
-    parser.add_argument(
-        "--distance-scale",
-        type=float,
-        default=1.0,
-    )
-
-    args = parser.parse_args()
-
-    paths = (args.reference, args.best, args.worst)
-
-    # No file arguments: inspect the examples folder.
-    if all(path is None for path in paths):
-        inspect_files(args.examples)
-        return
-
-    if any(path is None for path in paths):
-        parser.error(
-            "Provide --reference, --best, and --worst together."
-        )
-
-    try:
-        reference = load_motion(
-            args.reference,
-            args.reference_key,
-        )
-        best = load_motion(
-            args.best,
-            args.best_key,
-        )
-        worst = load_motion(
-            args.worst,
-            args.worst_key,
-        )
-
-        best_results = evaluate(
-            reference,
-            best,
-            args.distance_scale,
-        )
-        worst_results = evaluate(
-            reference,
-            worst,
-            args.distance_scale,
-        )
-
-        print_results("BEST MOTION", best_results)
-        print_results("WORST MOTION", worst_results)
-
-        angle_difference = (
-            best_results["angles"]["score"]
-            - worst_results["angles"]["score"]
-        )
-        position_difference = (
-            best_results["positions"]["score"]
-            - worst_results["positions"]["score"]
-        )
-
-        print("\nBEST MINUS WORST")
-        print("  Positive means the best motion scored higher.")
-        print(f"  Angle difference:    {angle_difference:+.4f}")
-        print(f"  Position difference: {position_difference:+.4f}")
-
-    except (OSError, ValueError, TypeError) as error:
-        parser.exit(1, f"\nError: {error}\n")
 
 
 if __name__ == "__main__":
-    main()
+
+    examples_dir = (
+        Path(__file__).resolve().parents[1]
+        / "examples"
+    )
+
+    best_data = np.load(
+        examples_dir
+        / "danceOne_best_keypoints.npz"
+    )
+
+    worst_data = np.load(
+        examples_dir
+        / "danceOne_worst_keypoints.npz"
+    )
+
+    reference = best_data["world"]
+    worst = worst_data["world"]
+
+    fps = float(best_data["fps"])
+
+    print("Reference shape:", reference.shape)
+    print("Worst shape:", worst.shape)
+    print("FPS:", fps)
+
+    # Perfect match
+    perfect_result = dance_similarity(
+        reference,
+        reference,
+        fps
+    )
+
+    print("\nBEST VS BEST")
+
+    for key, value in perfect_result.items():
+        print(key, ":", value)
+
+    # Intentionally bad motion
+    worst_result = dance_similarity(
+        reference,
+        worst,
+        fps
+    )
+
+    print("\nBEST VS WORST")
+
+    for key, value in worst_result.items():
+        print(key, ":", value)
