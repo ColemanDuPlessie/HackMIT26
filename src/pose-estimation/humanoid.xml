@@ -1,0 +1,131 @@
+<!--
+  Simple humanoid for video pose retargeting.
+
+  Conventions: z-up, facing +x, left side at +y. The pelvis origin is the midpoint
+  between the hip joints, matching the origin of MediaPipe's world landmarks.
+  Each site named mp_<index> sits where MediaPipe landmark <index> would be; the
+  IK in retarget.py tracks these sites. Segment lengths (approx. 1.75 m adult) are
+  read from this file at runtime, so editing site positions here rescales the
+  retargeting automatically.
+-->
+<mujoco model="mp_humanoid">
+  <compiler angle="degree"/>
+  <option timestep="0.01"/>
+
+  <visual>
+    <global offwidth="1280" offheight="720"/>
+  </visual>
+
+  <default>
+    <geom type="capsule" size="0.045" contype="0" conaffinity="0" rgba="0.8 0.6 0.45 1"/>
+    <site size="0.02" rgba="1 0.2 0.2 1" group="3"/>
+    <joint damping="1" armature="0.01"/>
+  </default>
+
+  <asset>
+    <texture name="grid" type="2d" builtin="checker" rgb1="0.2 0.25 0.3" rgb2="0.3 0.35 0.4" width="512" height="512"/>
+    <material name="grid" texture="grid" texrepeat="4 4" reflectance="0.1"/>
+  </asset>
+
+  <worldbody>
+    <light pos="0 0 4" dir="0 0 -1" directional="true"/>
+    <geom name="floor" type="plane" size="10 10 0.1" material="grid" contype="1" conaffinity="1"/>
+
+    <body name="pelvis" pos="0 0 0.93">
+      <freejoint name="root"/>
+      <geom fromto="0 -0.09 0 0 0.09 0" size="0.07"/>
+      <site name="mp_23" pos="0 0.09 0"/>
+      <site name="mp_24" pos="0 -0.09 0"/>
+
+      <body name="torso">
+        <joint name="spine" type="ball"/>
+        <geom fromto="0 0 0.05 0 0 0.42" size="0.09"/>
+        <geom fromto="0 -0.18 0.48 0 0.18 0.48" size="0.05"/>
+        <site name="mp_11" pos="0 0.18 0.50"/>
+        <site name="mp_12" pos="0 -0.18 0.50"/>
+
+        <body name="head" pos="0 0 0.55">
+          <joint name="neck" type="ball"/>
+          <geom type="sphere" pos="0.02 0 0.12" size="0.1"/>
+          <site name="mp_0" pos="0.11 0 0.12"/>
+          <site name="mp_7" pos="0.01 0.075 0.12"/>
+          <site name="mp_8" pos="0.01 -0.075 0.12"/>
+        </body>
+
+        <!-- Left arm -->
+        <body name="l_upper_arm" pos="0 0.18 0.50">
+          <joint name="l_shoulder" type="ball"/>
+          <geom fromto="0 0 0 0 0 -0.28" size="0.04"/>
+          <body name="l_forearm" pos="0 0 -0.28">
+            <joint name="l_elbow" type="hinge" axis="0 -1 0" range="-5 150"/>
+            <site name="mp_13"/>
+            <geom fromto="0 0 0 0 0 -0.26" size="0.035"/>
+            <body name="l_hand" pos="0 0 -0.26">
+              <joint name="l_wrist" type="ball"/>
+              <site name="mp_15"/>
+              <geom type="box" pos="0.01 0 -0.05" size="0.04 0.015 0.05"/>
+              <site name="mp_17" pos="-0.02 0 -0.08"/>
+              <site name="mp_19" pos="0.03 0 -0.09"/>
+              <site name="mp_21" pos="0.05 0 -0.04"/>
+            </body>
+          </body>
+        </body>
+
+        <!-- Right arm -->
+        <body name="r_upper_arm" pos="0 -0.18 0.50">
+          <joint name="r_shoulder" type="ball"/>
+          <geom fromto="0 0 0 0 0 -0.28" size="0.04"/>
+          <body name="r_forearm" pos="0 0 -0.28">
+            <joint name="r_elbow" type="hinge" axis="0 -1 0" range="-5 150"/>
+            <site name="mp_14"/>
+            <geom fromto="0 0 0 0 0 -0.26" size="0.035"/>
+            <body name="r_hand" pos="0 0 -0.26">
+              <joint name="r_wrist" type="ball"/>
+              <site name="mp_16"/>
+              <geom type="box" pos="0.01 0 -0.05" size="0.04 0.015 0.05"/>
+              <site name="mp_18" pos="-0.02 0 -0.08"/>
+              <site name="mp_20" pos="0.03 0 -0.09"/>
+              <site name="mp_22" pos="0.05 0 -0.04"/>
+            </body>
+          </body>
+        </body>
+      </body>
+
+      <!-- Left leg -->
+      <body name="l_thigh" pos="0 0.09 0">
+        <joint name="l_hip" type="ball"/>
+        <geom fromto="0 0 0 0 0 -0.42" size="0.06"/>
+        <body name="l_shin" pos="0 0 -0.42">
+          <joint name="l_knee" type="hinge" axis="0 1 0" range="-5 150"/>
+          <site name="mp_25"/>
+          <geom fromto="0 0 0 0 0 -0.42" size="0.05"/>
+          <body name="l_foot" pos="0 0 -0.42">
+            <joint name="l_ankle" type="ball"/>
+            <site name="mp_27"/>
+            <geom fromto="-0.05 0 -0.05 0.15 0 -0.05" size="0.035"/>
+            <site name="mp_29" pos="-0.06 0 -0.06"/>
+            <site name="mp_31" pos="0.16 0 -0.06"/>
+          </body>
+        </body>
+      </body>
+
+      <!-- Right leg -->
+      <body name="r_thigh" pos="0 -0.09 0">
+        <joint name="r_hip" type="ball"/>
+        <geom fromto="0 0 0 0 0 -0.42" size="0.06"/>
+        <body name="r_shin" pos="0 0 -0.42">
+          <joint name="r_knee" type="hinge" axis="0 1 0" range="-5 150"/>
+          <site name="mp_26"/>
+          <geom fromto="0 0 0 0 0 -0.42" size="0.05"/>
+          <body name="r_foot" pos="0 0 -0.42">
+            <joint name="r_ankle" type="ball"/>
+            <site name="mp_28"/>
+            <geom fromto="-0.05 0 -0.05 0.15 0 -0.05" size="0.035"/>
+            <site name="mp_30" pos="-0.06 0 -0.06"/>
+            <site name="mp_32" pos="0.16 0 -0.06"/>
+          </body>
+        </body>
+      </body>
+    </body>
+  </worldbody>
+</mujoco>
