@@ -17,14 +17,15 @@ import time
 import traceback
 import uuid
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, fields
 from pathlib import Path
 
 import cv2
 import mujoco
 import numpy as np
 import uvicorn
-from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, UploadFile, WebSocket, WebSocketDisconnect
+from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
@@ -38,6 +39,10 @@ VIDEO_EXTS = {".mp4", ".mov", ".m4v", ".webm", ".avi", ".mkv"}
 DOWNLOADS = {"keypoints.npz", "motion.npz"}
 # Share of the progress bar given to landmark extraction; IK takes the rest.
 EXTRACT_SHARE = 0.85
+# Live smoothing presets -> One-Euro min_cutoff (Hz); lower is smoother but laggier.
+LIVE_SMOOTHING = {"low": 3.0, "medium": 1.5, "high": 0.7}
+GEOM_TYPES = {mujoco.mjtGeom.mjGEOM_CAPSULE: "capsule", mujoco.mjtGeom.mjGEOM_BOX: "box",
+              mujoco.mjtGeom.mjGEOM_SPHERE: "sphere"}
 
 
 @dataclass
@@ -47,6 +52,9 @@ class Job:
     video: str
     model: str
     smooth: float
+    # Recording length in seconds, for browser recordings whose container frame rate is unreliable;
+    # the frame rate is then computed as decoded frames / duration.
+    duration: float | None = None
     created: float = field(default_factory=time.time)
     status: str = "queued"  # queued | extracting | retargeting | done | error
     progress: float = 0.0
@@ -68,8 +76,10 @@ worker = ThreadPoolExecutor(max_workers=1)
 
 
 def load_saved_jobs():
+    known = {f.name for f in fields(Job)}
     for meta in JOBS_DIR.glob("*/meta.json"):
-        job = Job(**json.loads(meta.read_text()))
+        # Ignore keys from older/newer versions of Job so old jobs still load.
+        job = Job(**{k: v for k, v in json.loads(meta.read_text()).items() if k in known})
         if job.status not in ("done", "error"):  # interrupted by a restart
             job.status, job.error, job.message = "error", "Server restarted before the job finished", "Failed"
         jobs[job.id] = job
@@ -87,7 +97,10 @@ def run_job(job: Job):
         update(job, status="extracting", message="Detecting pose (MediaPipe)")
 
         def on_extract(done: int, total: int):
-            update(job, progress=EXTRACT_SHARE * done / total, message=f"Detecting pose: frame {done}/{total}")
+            if total:
+                update(job, progress=EXTRACT_SHARE * done / total, message=f"Detecting pose: frame {done}/{total}")
+            else:  # frame count unknown (e.g. browser recordings)
+                update(job, message=f"Detecting pose: frame {done}")
 
         kp = extract_keypoints.extract(str(job.dir / job.video), extract_keypoints.ensure_model(job.model),
                                        progress=on_extract)
@@ -95,6 +108,8 @@ def run_job(job: Job):
             raise ValueError("Could not read any frames from the video.")
         if not (kp["visibility"].sum(axis=1) > 0).any():
             raise ValueError("No person was detected in the video.")
+        if job.duration:
+            kp["fps"] = np.float32(len(kp["visibility"]) / job.duration)
         np.savez(job.dir / "keypoints.npz", **kp)
         t_extract = time.time() - t0
 
@@ -130,22 +145,8 @@ def build_result(kp: dict, motion: dict, video_path: Path) -> dict:
     """Everything the browser needs to play the result back without MuJoCo."""
     model = mujoco.MjModel.from_xml_path(str(motion["model_path"]))
     data = mujoco.MjData(model)
-    geom_ids = [g for g in range(model.ngeom) if model.geom_bodyid[g] != 0]  # skip the floor
-    type_names = {mujoco.mjtGeom.mjGEOM_CAPSULE: "capsule", mujoco.mjtGeom.mjGEOM_BOX: "box",
-                  mujoco.mjtGeom.mjGEOM_SPHERE: "sphere"}
-    geoms = [{"type": type_names.get(int(model.geom_type[g]), "sphere"),
-              "size": _r(model.geom_size[g]), "rgba": _r(model.geom_rgba[g], 3)} for g in geom_ids]
-
-    poses = []
-    quat = np.zeros(4)
-    for q in motion["qpos"]:
-        data.qpos[:] = q
-        mujoco.mj_kinematics(model, data)
-        frame = []
-        for g in geom_ids:
-            mujoco.mju_mat2Quat(quat, data.geom_xmat[g])
-            frame.extend(_r(np.concatenate([data.geom_xpos[g], quat])))
-        poses.append(frame)
+    geom_ids = body_geoms(model)
+    poses = [geom_poses(model, data, geom_ids, q) for q in motion["qpos"]]
 
     cap = cv2.VideoCapture(str(video_path))
     width, height = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)), int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
@@ -155,7 +156,7 @@ def build_result(kp: dict, motion: dict, video_path: Path) -> dict:
         "fps": float(motion["fps"]),
         "n_frames": len(motion["qpos"]),
         "video_size": [width, height],
-        "geoms": geoms,
+        "geoms": geom_info(model, geom_ids),
         "poses": poses,  # per frame: [x, y, z, qw, qx, qy, qz] for each geom, flattened
         "root": _r(motion["qpos"][:, :3]),
         "targets": _r(motion["targets"]),  # NaN (untracked landmarks) -> null
@@ -163,6 +164,28 @@ def build_result(kp: dict, motion: dict, video_path: Path) -> dict:
         "landmarks_2d": _r(kp["image"][:, :, :2]),
         "visibility": _r(kp["visibility"], 2),
     }
+
+
+def body_geoms(model: mujoco.MjModel) -> list[int]:
+    """Ids of the humanoid's geoms (everything except world-attached ones like the floor)."""
+    return [g for g in range(model.ngeom) if model.geom_bodyid[g] != 0]
+
+
+def geom_info(model: mujoco.MjModel, geom_ids: list[int]) -> list[dict]:
+    return [{"type": GEOM_TYPES.get(int(model.geom_type[g]), "sphere"),
+             "size": _r(model.geom_size[g]), "rgba": _r(model.geom_rgba[g], 3)} for g in geom_ids]
+
+
+def geom_poses(model: mujoco.MjModel, data: mujoco.MjData, geom_ids: list[int], qpos: np.ndarray) -> list:
+    """Flattened [x, y, z, qw, qx, qy, qz] per geom for one qpos."""
+    data.qpos[:] = qpos
+    mujoco.mj_kinematics(model, data)
+    quat = np.zeros(4)
+    out = []
+    for g in geom_ids:
+        mujoco.mju_mat2Quat(quat, data.geom_xmat[g])
+        out.extend(_r(np.concatenate([data.geom_xpos[g], quat])))
+    return out
 
 
 def _r(a, digits: int = 4):
@@ -175,7 +198,8 @@ app = FastAPI(title="Pose estimation UI")
 
 
 @app.post("/api/jobs")
-def create_job(file: UploadFile = File(...), model: str = Form("full"), smooth: float = Form(0.2)):
+def create_job(file: UploadFile = File(...), model: str = Form("full"), smooth: float = Form(0.2),
+               duration: float | None = Form(None)):
     ext = Path(file.filename or "").suffix.lower()
     if ext not in VIDEO_EXTS:
         raise HTTPException(400, f"Unsupported file type '{ext}'. Use one of: {', '.join(sorted(VIDEO_EXTS))}")
@@ -183,9 +207,11 @@ def create_job(file: UploadFile = File(...), model: str = Form("full"), smooth: 
         raise HTTPException(400, "model must be lite, full or heavy")
     if not 0 <= smooth <= 2:
         raise HTTPException(400, "smooth must be between 0 and 2 seconds")
+    if duration is not None and not 0.1 <= duration <= 3600:
+        raise HTTPException(400, "duration must be between 0.1 and 3600 seconds")
 
     job = Job(id=uuid.uuid4().hex[:12], filename=Path(file.filename).name, video=f"input{ext}",
-              model=model, smooth=smooth)
+              model=model, smooth=smooth, duration=duration)
     job.dir.mkdir(parents=True)
     with open(job.dir / job.video, "wb") as out:
         shutil.copyfileobj(file.file, out)
@@ -236,6 +262,69 @@ def _job(job_id: str) -> Job:
     if job is None:
         raise HTTPException(404, "Job not found")
     return job
+
+
+@app.get("/api/model")
+def get_model():
+    """Static geometry of the default humanoid, for the live view."""
+    model = mujoco.MjModel.from_xml_path(str(retarget.DEFAULT_MODEL))
+    return {"geoms": geom_info(model, body_geoms(model))}
+
+
+@app.websocket("/api/live")
+async def live(ws: WebSocket):
+    """Streaming IK. The client sends MediaPipe world landmarks and gets back humanoid geom poses.
+
+    Client -> server:
+        {"type": "frame", "t": seconds, "world": [[x, y, z] * 33] | null, "visibility": [33 floats]}
+        {"type": "config", "smoothing": "low" | "medium" | "high"}
+    Server -> client (one reply per frame message):
+        {"type": "pose", "t", "poses", "root", "targets", "error_cm", "ik_ms"}  or  {"type": "pose", "t", "lost": true}
+        {"type": "error", "message"}
+    The client should wait for each reply before sending the next frame, so latency stays bounded.
+    """
+    await ws.accept()
+    streamer = retarget.StreamingRetargeter(min_cutoff=LIVE_SMOOTHING["medium"])
+    model = streamer.model
+    data = mujoco.MjData(model)
+    geom_ids = body_geoms(model)
+
+    def step(world, visibility, t):
+        t0 = time.perf_counter()
+        out = streamer.step(world, visibility, t)
+        if out is None:
+            return {"type": "pose", "t": t, "lost": True}
+        return {"type": "pose", "t": t, "poses": geom_poses(model, data, geom_ids, out["qpos"]),
+                "root": _r(out["qpos"][:3]), "targets": _r(out["targets"]),
+                "error_cm": round(out["error"] * 100, 2), "ik_ms": round((time.perf_counter() - t0) * 1000, 1)}
+
+    try:
+        while True:
+            msg = await ws.receive_json()
+            if msg.get("type") == "config":
+                streamer.set_smoothing(LIVE_SMOOTHING.get(msg.get("smoothing"), LIVE_SMOOTHING["medium"]))
+                continue
+            if msg.get("type") != "frame":
+                continue
+            try:
+                t = float(msg["t"])
+                world = msg.get("world")
+                visibility = msg.get("visibility")
+                if world is not None:
+                    world = np.asarray(world, dtype=np.float64)
+                    if world.shape != (33, 3) or not np.isfinite(world).all():
+                        raise ValueError("world must be 33 finite [x, y, z] landmarks")
+                    visibility = np.asarray(visibility, dtype=np.float64) if visibility is not None else None
+                    if visibility is not None and visibility.shape != (33,):
+                        raise ValueError("visibility must have 33 values")
+                reply = await run_in_threadpool(step, world, visibility, t)
+            except KeyError as e:
+                reply = {"type": "error", "message": f"missing field {e}"}
+            except (TypeError, ValueError) as e:
+                reply = {"type": "error", "message": str(e)}
+            await ws.send_json(reply)
+    except WebSocketDisconnect:
+        pass
 
 
 @app.get("/")

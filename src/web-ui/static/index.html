@@ -9,7 +9,8 @@
     {
       "imports": {
         "three": "https://cdn.jsdelivr.net/npm/three@0.170.0/build/three.module.js",
-        "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.170.0/examples/jsm/"
+        "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.170.0/examples/jsm/",
+        "@mediapipe/tasks-vision": "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@1.0.1/vision_bundle.mjs"
       }
     }
   </script>
@@ -17,10 +18,15 @@
 <body>
   <header>
     <h1>Video → MuJoCo pose</h1>
-    <p class="sub">Upload a video of one person. MediaPipe finds their 3D pose in each frame and IK fits it to a MuJoCo humanoid.</p>
+    <p class="sub">Upload a video of one person, or use your webcam. MediaPipe finds their 3D pose in each frame and IK fits it to a MuJoCo humanoid.</p>
+    <nav class="tabs" role="tablist">
+      <button id="tab-upload" role="tab" aria-selected="true">Upload video</button>
+      <button id="tab-live" role="tab" aria-selected="false">Live webcam</button>
+    </nav>
   </header>
 
   <main>
+  <div id="upload-view">
     <section class="card" id="upload-card">
       <form id="upload-form">
         <label id="drop-zone" for="file-input">
@@ -98,6 +104,48 @@
       <h2>Previous runs</h2>
       <ul id="history"></ul>
     </section>
+  </div>
+
+  <div id="live-view" hidden>
+    <section class="card live-bar">
+      <button id="live-start" class="primary">Start camera</button>
+      <label>Pose model
+        <select id="live-model">
+          <option value="lite">Lite (fastest)</option>
+          <option value="full" selected>Full</option>
+          <option value="heavy">Heavy (most accurate)</option>
+        </select>
+      </label>
+      <label>Smoothing
+        <select id="live-smoothing">
+          <option value="low">Low (least lag)</option>
+          <option value="medium" selected>Medium</option>
+          <option value="high">High (steadiest)</option>
+        </select>
+      </label>
+      <label class="toggle"><input type="checkbox" id="live-mirror" checked> Mirror</label>
+      <label class="toggle"><input type="checkbox" id="live-targets" checked> IK targets</label>
+      <button id="live-record" disabled>● Record</button>
+    </section>
+    <p id="live-status" class="status-line"></p>
+
+    <div class="panels">
+      <figure class="panel">
+        <figcaption>Webcam + MediaPipe keypoints</figcaption>
+        <div class="stage" id="live-stage">
+          <video id="live-video" muted playsinline></video>
+          <canvas id="live-overlay"></canvas>
+        </div>
+      </figure>
+      <figure class="panel">
+        <figcaption>MuJoCo humanoid (live) <span class="hint">drag to orbit · scroll to zoom</span></figcaption>
+        <div class="stage" id="live-three"></div>
+      </figure>
+    </div>
+    <p id="live-stats" class="mono live-stats"></p>
+    <p class="live-note">Live results only use past frames, so they're a little noisier than processing a video.
+      <strong>Record</strong> saves your webcam video and runs the full pipeline on it when you stop.</p>
+  </div>
   </main>
 
   <script type="module" src="/static/app.js"></script>

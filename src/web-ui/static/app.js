@@ -1,29 +1,33 @@
-import * as THREE from 'three';
-import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+import { HumanoidView } from './humanoid-view.js';
+import { clearCanvas, drawSkeleton, fitCanvas } from './skeleton.js';
+import { LiveSession } from './live.js';
 
 const $ = (id) => document.getElementById(id);
-
-// MediaPipe pose landmark connections, and which landmarks are on the subject's left.
-const CONNECTIONS = [
-  [0, 1], [1, 2], [2, 3], [3, 7], [0, 4], [4, 5], [5, 6], [6, 8], [9, 10],
-  [11, 12], [11, 13], [13, 15], [15, 17], [15, 19], [15, 21], [17, 19],
-  [12, 14], [14, 16], [16, 18], [16, 20], [16, 22], [18, 20],
-  [11, 23], [12, 24], [23, 24], [23, 25], [24, 26], [25, 27], [26, 28],
-  [27, 29], [28, 30], [29, 31], [30, 32], [27, 31], [28, 32],
-];
-const LEFT = new Set([1, 2, 3, 7, 9, 11, 13, 15, 17, 19, 21, 23, 25, 27, 29, 31]);
-const COLOR_LEFT = '#ffa94d';
-const COLOR_RIGHT = '#4dabf7';
-const COLOR_CENTER = '#e6e9ee';
-const MIN_VISIBILITY = 0.5;
-// Camera offset from the pelvis: in front of the subject (+x) and slightly to their left (+y),
-// so the 3D view roughly matches the video's viewpoint.
-const CAMERA_OFFSET = new THREE.Vector3(3.0, 1.0, 0.6);
-
-// Face landmarks (0-10) are drawn neutral; body landmarks by side.
-const colorOf = (i) => (i <= 10 ? COLOR_CENTER : LEFT.has(i) ? COLOR_LEFT : COLOR_RIGHT);
-
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+
+// ---------------------------------------------------------------- tabs
+
+let live = null;
+
+function showTab(name) {
+  const isLive = name === 'live';
+  $('tab-upload').setAttribute('aria-selected', String(!isLive));
+  $('tab-live').setAttribute('aria-selected', String(isLive));
+  $('upload-view').hidden = isLive;
+  $('live-view').hidden = !isLive;
+  if (isLive) {
+    trackToken++; // stop polling any job
+    disposePlayer();
+    history.replaceState(null, '', '#live');
+    live ??= new LiveSession({ onRecording: uploadRecording });
+  } else {
+    live?.stop();
+    if (location.hash === '#live') history.replaceState(null, '', location.pathname);
+  }
+}
+
+$('tab-upload').addEventListener('click', () => showTab('upload'));
+$('tab-live').addEventListener('click', () => showTab('live'));
 
 // ---------------------------------------------------------------- upload + jobs
 
@@ -56,12 +60,21 @@ dropZone.addEventListener('drop', (e) => {
 $('upload-form').addEventListener('submit', async (e) => {
   e.preventDefault();
   if (!selectedFile) return;
-  const form = new FormData();
-  form.append('file', selectedFile);
-  form.append('model', $('model-select').value);
-  form.append('smooth', $('smooth-select').value);
-
   $('run-btn').disabled = true;
+  try {
+    await uploadVideo(selectedFile, { model: $('model-select').value, smooth: $('smooth-select').value });
+  } finally {
+    $('run-btn').disabled = !selectedFile;
+  }
+});
+
+/** Upload a video as a new job and start tracking it. Returns the job id, or null on failure. */
+async function uploadVideo(file, { model, smooth, duration }) {
+  const form = new FormData();
+  form.append('file', file);
+  form.append('model', model);
+  form.append('smooth', smooth);
+  if (duration) form.append('duration', duration.toFixed(3));
   hideError();
   showProgress(0, 'Uploading…');
   try {
@@ -70,13 +83,19 @@ $('upload-form').addEventListener('submit', async (e) => {
     if (!res.ok) throw new Error(body.detail || res.statusText);
     refreshHistory();
     track(body.id);
+    return body.id;
   } catch (err) {
     hideProgress();
     showError(`Upload failed: ${err.message}`);
-  } finally {
-    $('run-btn').disabled = !selectedFile;
+    return null;
   }
-});
+}
+
+/** Called by the live session when a recording stops: process it like an upload. */
+async function uploadRecording(file, { model, duration }) {
+  showTab('upload');
+  await uploadVideo(file, { model, smooth: '0.2', duration });
+}
 
 async function track(id) {
   const token = ++trackToken;
@@ -214,7 +233,7 @@ class Player {
     this.video.src = `/api/jobs/${jobId}/video`;
 
     this.overlay = $('overlay');
-    this.setupThree();
+    this.view = new HumanoidView($('three-stage'), result.geoms, result.root[0]);
 
     // Controls
     const scrubber = $('scrubber');
@@ -236,83 +255,13 @@ class Player {
       else if (e.code === 'ArrowLeft') { this.pause(); this.seek(Math.max(this.frame - 1, 0)); }
     }, { signal });
 
-    this.resizeObserver = new ResizeObserver(() => this.resize());
-    this.resizeObserver.observe($('three-stage'));
+    this.resizeObserver = new ResizeObserver(() => { fitCanvas(this.overlay); this.dirty = true; });
     this.resizeObserver.observe($('video-stage'));
-    this.resize();
+    fitCanvas(this.overlay);
     this.pause();
 
     this.last = performance.now();
     this.raf = requestAnimationFrame((now) => this.tick(now));
-  }
-
-  setupThree() {
-    const stage = $('three-stage');
-    const renderer = new THREE.WebGLRenderer({ antialias: true });
-    renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
-    renderer.shadowMap.enabled = true;
-    stage.appendChild(renderer.domElement);
-
-    const scene = new THREE.Scene();
-    scene.background = new THREE.Color(0x0b0e12);
-
-    const camera = new THREE.PerspectiveCamera(45, 1, 0.05, 100);
-    camera.up.set(0, 0, 1); // MuJoCo is z-up
-    const controls = new OrbitControls(camera, renderer.domElement);
-    controls.enableDamping = true;
-    const root = new THREE.Vector3(...this.r.root[0]);
-    controls.target.copy(root);
-    camera.position.copy(root).add(CAMERA_OFFSET);
-
-    const hemi = new THREE.HemisphereLight(0xffffff, 0x303640, 1.4);
-    hemi.position.set(0, 0, 1);
-    scene.add(hemi);
-    const sun = new THREE.DirectionalLight(0xffffff, 1.6);
-    sun.position.set(2, 1.5, 5);
-    sun.castShadow = true;
-    sun.shadow.mapSize.set(1024, 1024);
-    Object.assign(sun.shadow.camera, { left: -3, right: 3, top: 3, bottom: -3 });
-    scene.add(sun);
-
-    const ground = new THREE.Mesh(
-      new THREE.PlaneGeometry(20, 20),
-      new THREE.MeshStandardMaterial({ color: 0x1a2028, roughness: 0.95 }),
-    );
-    ground.receiveShadow = true;
-    scene.add(ground);
-    const grid = new THREE.GridHelper(20, 40, 0x3a4450, 0x262d36);
-    grid.rotation.x = Math.PI / 2; // GridHelper lies in XZ; MuJoCo floor is XY
-    grid.position.z = 0.001;
-    scene.add(grid);
-
-    this.meshes = this.r.geoms.map((g) => {
-      let geometry;
-      if (g.type === 'capsule') {
-        geometry = new THREE.CapsuleGeometry(g.size[0], 2 * g.size[1], 6, 16).rotateX(Math.PI / 2); // Y -> Z axis
-      } else if (g.type === 'box') {
-        geometry = new THREE.BoxGeometry(2 * g.size[0], 2 * g.size[1], 2 * g.size[2]);
-      } else {
-        geometry = new THREE.SphereGeometry(g.size[0], 24, 16);
-      }
-      const material = new THREE.MeshStandardMaterial({
-        color: new THREE.Color(g.rgba[0], g.rgba[1], g.rgba[2]),
-        roughness: 0.55,
-      });
-      const mesh = new THREE.Mesh(geometry, material);
-      mesh.castShadow = true;
-      scene.add(mesh);
-      return mesh;
-    });
-
-    this.targetMesh = new THREE.InstancedMesh(
-      new THREE.SphereGeometry(0.022, 12, 8),
-      new THREE.MeshBasicMaterial({ color: 0x3ecf8e }),
-      33,
-    );
-    scene.add(this.targetMesh);
-    this.dummy = new THREE.Object3D();
-
-    Object.assign(this, { renderer, scene, camera, controls, ground, grid });
   }
 
   play() {
@@ -351,101 +300,20 @@ class Player {
       this.dirty = false;
       this.drawFrame(frame);
     }
-    this.controls.update();
-    this.renderer.render(this.scene, this.camera);
     this.raf = requestAnimationFrame((t) => this.tick(t));
   }
 
   drawFrame(f) {
-    const pose = this.r.poses[f];
-    this.meshes.forEach((mesh, i) => {
-      const o = i * 7;
-      mesh.position.set(pose[o], pose[o + 1], pose[o + 2]);
-      mesh.quaternion.set(pose[o + 4], pose[o + 5], pose[o + 6], pose[o + 3]); // MuJoCo wxyz -> three xyzw
-    });
-
-    const showTargets = $('show-targets').checked;
-    const targets = this.r.targets[f];
-    for (let j = 0; j < 33; j++) {
-      const p = targets[j];
-      const visible = showTargets && p[0] !== null;
-      this.dummy.position.set(visible ? p[0] : 0, visible ? p[1] : 0, visible ? p[2] : 0);
-      this.dummy.scale.setScalar(visible ? 1 : 0);
-      this.dummy.updateMatrix();
-      this.targetMesh.setMatrixAt(j, this.dummy.matrix);
-    }
-    this.targetMesh.instanceMatrix.needsUpdate = true;
-
-    // Follow the pelvis, keeping the user's chosen camera offset.
-    const root = new THREE.Vector3(...this.r.root[f]);
-    const delta = root.sub(this.controls.target);
-    this.controls.target.add(delta);
-    this.camera.position.add(delta);
-
+    this.view.setPose(this.r.poses[f], this.r.root[f]);
+    this.view.setTargets($('show-targets').checked ? this.r.targets[f] : null);
     $('scrubber').value = f;
     $('frame-label').textContent =
       `${f + 1}/${this.n} · ${(f / this.fps).toFixed(2)} s · ${this.r.error_cm[f].toFixed(1)} cm`;
-    this.drawOverlay(f);
-  }
 
-  drawOverlay(f) {
-    const canvas = this.overlay;
-    const ctx = canvas.getContext('2d');
-    ctx.clearRect(0, 0, canvas.width, canvas.height);
-    if (!$('show-keypoints').checked) return;
-
-    const dpr = window.devicePixelRatio || 1;
-    const cw = canvas.width / dpr;
-    const ch = canvas.height / dpr;
-    let [vw, vh] = this.r.video_size;
-    if (this.videoOk && this.video.videoWidth) [vw, vh] = [this.video.videoWidth, this.video.videoHeight];
-    // Match the video's object-fit: contain placement.
-    const s = Math.min(cw / vw, ch / vh);
-    const ox = (cw - vw * s) / 2;
-    const oy = (ch - vh * s) / 2;
-    const lm = this.r.landmarks_2d[f];
-    const vis = this.r.visibility[f];
-    const ok = (i) => lm[i][0] !== null && vis[i] >= MIN_VISIBILITY;
-    const px = (i) => [ox + lm[i][0] * vw * s, oy + lm[i][1] * vh * s];
-
-    ctx.save();
-    ctx.scale(dpr, dpr);
-    ctx.lineWidth = 3;
-    ctx.lineCap = 'round';
-    for (const [a, b] of CONNECTIONS) {
-      if (!ok(a) || !ok(b)) continue;
-      ctx.strokeStyle = colorOf(a) === colorOf(b) ? colorOf(a) : COLOR_CENTER;
-      const [x1, y1] = px(a);
-      const [x2, y2] = px(b);
-      ctx.beginPath();
-      ctx.moveTo(x1, y1);
-      ctx.lineTo(x2, y2);
-      ctx.stroke();
-    }
-    for (let i = 0; i < 33; i++) {
-      if (!ok(i)) continue;
-      const [x, y] = px(i);
-      ctx.fillStyle = colorOf(i);
-      ctx.beginPath();
-      ctx.arc(x, y, 3.5, 0, 2 * Math.PI);
-      ctx.fill();
-    }
-    ctx.restore();
-  }
-
-  resize() {
-    const stage = $('three-stage');
-    const { width, height } = stage.getBoundingClientRect();
-    if (width > 0 && height > 0) {
-      this.renderer.setSize(width, height);
-      this.camera.aspect = width / height;
-      this.camera.updateProjectionMatrix();
-    }
-    const vs = $('video-stage').getBoundingClientRect();
-    const dpr = window.devicePixelRatio || 1;
-    this.overlay.width = Math.round(vs.width * dpr);
-    this.overlay.height = Math.round(vs.height * dpr);
-    this.dirty = true;
+    if (!$('show-keypoints').checked) { clearCanvas(this.overlay); return; }
+    let size = this.r.video_size;
+    if (this.videoOk && this.video.videoWidth) size = [this.video.videoWidth, this.video.videoHeight];
+    drawSkeleton(this.overlay, this.r.landmarks_2d[f], this.r.visibility[f], size);
   }
 
   dispose() {
@@ -455,19 +323,17 @@ class Player {
     this.video.pause();
     this.video.removeAttribute('src');
     this.video.load();
-    this.overlay.getContext('2d').clearRect(0, 0, this.overlay.width, this.overlay.height);
-    this.scene.traverse((obj) => {
-      if (obj.geometry) obj.geometry.dispose();
-      if (obj.material) obj.material.dispose();
-    });
-    this.controls.dispose();
-    this.renderer.dispose();
-    this.renderer.domElement.remove();
+    clearCanvas(this.overlay);
+    this.view.dispose();
   }
 }
 
 // ---------------------------------------------------------------- startup
 
 refreshHistory();
-const initial = new URLSearchParams(location.hash.slice(1)).get('job');
-if (initial) track(initial);
+if (location.hash === '#live') {
+  showTab('live');
+} else {
+  const initial = new URLSearchParams(location.hash.slice(1)).get('job');
+  if (initial) track(initial);
+}

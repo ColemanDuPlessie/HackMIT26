@@ -45,6 +45,10 @@ The package is installable (`web-ui` uses it as an editable dependency). Main en
 import extract_keypoints, retarget
 kp = extract_keypoints.extract("input.mp4", extract_keypoints.ensure_model("full"), progress=print)
 motion = retarget.retarget(kp, smooth=0.2, progress=print)   # same contents as motion.npz
+
+# Live / frame-at-a-time: causal filtering, no look-ahead. world is (33, 3) MediaPipe world landmarks.
+streamer = retarget.StreamingRetargeter()
+out = streamer.step(world, visibility, t_seconds)   # {qpos, targets, error}, or None if no person
 ```
 
 ## Files

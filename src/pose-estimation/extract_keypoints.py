@@ -40,8 +40,13 @@ def ensure_model(variant: str) -> Path:
 
 
 def extract(video_path: str, model_path: Path,
-            progress: Callable[[int, int], None] | None = None) -> dict:
-    """Run MediaPipe on every frame. `progress(done, total)` is called per frame if given."""
+            progress: Callable[[int, int], None] | None = None, fps: float | None = None) -> dict:
+    """Run MediaPipe on every frame. `progress(done, total)` is called per frame if given;
+    total is 0 when the container doesn't say how many frames it has.
+
+    `fps` overrides the container's frame rate, which is unreliable for some files (e.g. browser
+    MediaRecorder WebM often reports 1000 fps). Implausible container rates fall back to 30.
+    """
     opts = PoseLandmarkerOptions(
         base_options=BaseOptions(model_asset_path=str(model_path), delegate=BaseOptions.Delegate.CPU),
         running_mode=RunningMode.VIDEO,
@@ -50,8 +55,10 @@ def extract(video_path: str, model_path: Path,
     cap = cv2.VideoCapture(video_path)
     if not cap.isOpened():
         raise FileNotFoundError(f"Could not open video: {video_path}")
-    fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
-    total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    if fps is None:
+        fps = cap.get(cv2.CAP_PROP_FPS)
+        fps = fps if 1 <= fps <= 240 else 30.0
+    total = max(int(cap.get(cv2.CAP_PROP_FRAME_COUNT)), 0)  # negative/garbage for some WebM files
 
     world, image, vis = [], [], []
     with PoseLandmarker.create_from_options(opts) as landmarker:
@@ -74,7 +81,7 @@ def extract(video_path: str, model_path: Path,
                 vis.append(np.zeros(NUM_LANDMARKS))
             i += 1
             if progress:
-                progress(i, max(total, i))
+                progress(i, max(total, i) if total else 0)
     cap.release()
 
     vis = np.asarray(vis, dtype=np.float32)

@@ -134,40 +134,57 @@ def root_quat_from_targets(t: np.ndarray) -> np.ndarray:
     return quat
 
 
+class IKSolver:
+    """Per-frame IK onto the mp_<i> sites, warm-started from the previous frame's solution."""
+
+    def __init__(self, model: mujoco.MjModel, iters: int = 20, first_iters: int = 200, posture_cost: float = 0.02):
+        self.model, self.iters, self.first_iters = model, iters, first_iters
+        self.config = mink.Configuration(model)
+        self.tasks = {i: mink.FrameTask(f"mp_{i}", "site", position_cost=BASE_COST[i], orientation_cost=0.0)
+                      for i in TRACKED}
+        # Posture prior resolves limb twist ambiguity; zero cost on the free joint so it
+        # doesn't pull the root toward the origin.
+        posture_costs = np.full(model.nv, posture_cost)
+        posture_costs[:6] = 0.0
+        posture = mink.PostureTask(model, cost=posture_costs)
+        posture.set_target_from_configuration(self.config)
+        self.limits = [mink.ConfigurationLimit(model)]
+        self.all_tasks = [*self.tasks.values(), posture]
+        self.site_ids = [model.site(f"mp_{i}").id for i in TRACKED]
+        self.initialized = False
+
+    def reset(self):
+        """Forget the previous pose; the next step() re-initializes the root from its targets."""
+        self.initialized = False
+
+    def step(self, targets: np.ndarray, visibility: np.ndarray) -> tuple[np.ndarray, float]:
+        """Solve for one frame of (33, 3) targets. Returns (qpos copy, mean site error in meters)."""
+        if not self.initialized:
+            q = self.model.qpos0.copy()
+            q[0:3] = 0.5 * (targets[23] + targets[24])
+            q[3:7] = root_quat_from_targets(targets)
+            self.config.update(q)
+        for i, task in self.tasks.items():
+            task.set_target(mink.SE3.from_translation(targets[i]))
+            task.set_position_cost(BASE_COST[i] * max(float(visibility[i]), 0.1))
+        for _ in range(self.iters if self.initialized else self.first_iters):
+            vel = mink.solve_ik(self.config, self.all_tasks, 0.01, "daqp", damping=1e-3, limits=self.limits)
+            self.config.integrate_inplace(vel, 0.01)
+            if np.linalg.norm(vel) * 0.01 < 1e-5:
+                break
+        self.initialized = True
+        err = np.linalg.norm(self.config.data.site_xpos[self.site_ids] - targets[TRACKED], axis=1).mean()
+        return self.config.q.copy(), float(err)
+
+
 def solve(model: mujoco.MjModel, targets: np.ndarray, visibility: np.ndarray,
           iters: int = 20, first_iters: int = 200, posture_cost: float = 0.02,
           progress: Callable[[int, int], None] | None = None) -> tuple[np.ndarray, np.ndarray]:
-    config = mink.Configuration(model)
-    tasks = {i: mink.FrameTask(f"mp_{i}", "site", position_cost=BASE_COST[i], orientation_cost=0.0)
-             for i in TRACKED}
-    # Posture prior resolves limb twist ambiguity; zero cost on the free joint so it
-    # doesn't pull the root toward the origin.
-    posture_costs = np.full(model.nv, posture_cost)
-    posture_costs[:6] = 0.0
-    posture = mink.PostureTask(model, cost=posture_costs)
-    posture.set_target_from_configuration(config)
-    limits = [mink.ConfigurationLimit(model)]
-    all_tasks = [*tasks.values(), posture]
-
-    q = model.qpos0.copy()
-    q[0:3] = 0.5 * (targets[0, 23] + targets[0, 24])
-    q[3:7] = root_quat_from_targets(targets[0])
-    config.update(q)
-
-    site_ids = [model.site(f"mp_{i}").id for i in TRACKED]
+    solver = IKSolver(model, iters, first_iters, posture_cost)
     qpos = np.zeros((len(targets), model.nq))
     err = np.zeros(len(targets))
     for f in range(len(targets)):
-        for i, task in tasks.items():
-            task.set_target(mink.SE3.from_translation(targets[f, i]))
-            task.set_position_cost(BASE_COST[i] * max(float(visibility[f, i]), 0.1))
-        for _ in range(first_iters if f == 0 else iters):
-            vel = mink.solve_ik(config, all_tasks, 0.01, "daqp", damping=1e-3, limits=limits)
-            config.integrate_inplace(vel, 0.01)
-            if np.linalg.norm(vel) * 0.01 < 1e-5:
-                break
-        qpos[f] = config.q
-        err[f] = np.linalg.norm(config.data.site_xpos[site_ids] - targets[f, TRACKED], axis=1).mean()
+        qpos[f], err[f] = solver.step(targets[f], visibility[f])
         if progress:
             progress(f + 1, len(targets))
     return qpos, err
@@ -190,6 +207,91 @@ def retarget(keypoints: Mapping, model_path: str | Path = DEFAULT_MODEL, smooth:
     return dict(qpos=qpos, targets=targets, error=err, fps=np.float32(fps),
                 joint_names=[model.joint(j).name for j in range(model.njnt)],
                 model_path=str(Path(model_path).resolve()))
+
+
+class OneEuroFilter:
+    """One-Euro filter (Casiez et al. 2012) over arrays: low lag when moving fast, smooth when still.
+
+    min_cutoff (Hz) sets smoothing at rest (lower = smoother); beta sets how quickly the cutoff
+    rises with speed (units of Hz per m/s here, since inputs are in meters).
+    """
+
+    def __init__(self, min_cutoff: float = 1.5, beta: float = 1.0, d_cutoff: float = 1.0):
+        self.min_cutoff, self.beta, self.d_cutoff = min_cutoff, beta, d_cutoff
+        self.reset()
+
+    def reset(self):
+        self.x = self.dx = self.t = None
+
+    @staticmethod
+    def _alpha(cutoff, dt):
+        tau = 1.0 / (2 * np.pi * cutoff)
+        return 1.0 / (1.0 + tau / dt)
+
+    def __call__(self, x: np.ndarray, t: float) -> np.ndarray:
+        if self.x is None:
+            self.x, self.dx, self.t = x.copy(), np.zeros_like(x), t
+            return x.copy()
+        dt = t - self.t if t > self.t else 1.0 / 30
+        self.t = t
+        dx = (x - self.x) / dt
+        self.dx = self.dx + self._alpha(self.d_cutoff, dt) * (dx - self.dx)
+        cutoff = self.min_cutoff + self.beta * np.abs(self.dx)
+        self.x = self.x + self._alpha(cutoff, dt) * (x - self.x)
+        return self.x.copy()
+
+
+class StreamingRetargeter:
+    """Causal, frame-at-a-time version of retarget() for live input.
+
+    Differences from the batch pipeline, which can look ahead: One-Euro filtering instead of
+    Savitzky-Golay, an exponential moving average for foot grounding, and no gap filling. After
+    `hold` seconds without a detection the solver resets, so a new person starts cleanly.
+    """
+
+    def __init__(self, model_path: str | Path = DEFAULT_MODEL, min_cutoff: float = 1.5, beta: float = 1.0,
+                 ground_tau: float = 0.1, hold: float = 0.5, iters: int = 20):
+        self.model = mujoco.MjModel.from_xml_path(str(model_path))
+        self.rest = rest_pose_sites(self.model)
+        self.floor_z = np.nanmin(self.rest[FOOT_POINTS, 2])
+        self.solver = IKSolver(self.model, iters=iters)
+        self.filter = OneEuroFilter(min_cutoff, beta)
+        self.ground_tau, self.hold = ground_tau, hold
+        self.shift = None
+        self.last_seen = None
+
+    def set_smoothing(self, min_cutoff: float):
+        self.filter.min_cutoff = min_cutoff
+
+    def reset(self):
+        self.solver.reset()
+        self.filter.reset()
+        self.shift = self.last_seen = None
+
+    def step(self, world: np.ndarray | None, visibility: np.ndarray | None, t: float) -> dict | None:
+        """world: (33, 3) MediaPipe world landmarks (camera axes) or None if no person; t in seconds.
+
+        Returns {qpos, targets, error} or None when there is no pose to show.
+        """
+        if world is None:
+            if self.last_seen is not None and t - self.last_seen > self.hold:
+                self.reset()
+            return None
+        dt = t - self.last_seen if self.last_seen is not None else None
+        self.last_seen = t
+
+        pts = self.filter(mp_to_mujoco(np.asarray(world, dtype=np.float64)), t)
+        targets = rescale_skeleton(pts[None], self.rest)[0]
+        shift = self.floor_z - targets[FOOT_POINTS, 2].min()
+        if self.shift is None or dt is None or dt <= 0:
+            self.shift = shift
+        else:
+            self.shift += (1 - np.exp(-dt / self.ground_tau)) * (shift - self.shift)
+        targets[:, 2] += self.shift
+
+        vis = np.ones(33) if visibility is None else np.asarray(visibility, dtype=np.float64)
+        qpos, err = self.solver.step(targets, vis)
+        return dict(qpos=qpos, targets=targets, error=err)
 
 
 def main():
