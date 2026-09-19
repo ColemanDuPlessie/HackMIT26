@@ -148,14 +148,10 @@ def build_result(kp: dict, motion: dict, video_path: Path) -> dict:
     geom_ids = body_geoms(model)
     poses = [geom_poses(model, data, geom_ids, q) for q in motion["qpos"]]
 
-    cap = cv2.VideoCapture(str(video_path))
-    width, height = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)), int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
-    cap.release()
-
     return {
         "fps": float(motion["fps"]),
         "n_frames": len(motion["qpos"]),
-        "video_size": [width, height],
+        "video_size": video_size(video_path),
         "geoms": geom_info(model, geom_ids),
         "poses": poses,  # per frame: [x, y, z, qw, qx, qy, qz] for each geom, flattened
         "root": _r(motion["qpos"][:, :3]),
@@ -164,6 +160,13 @@ def build_result(kp: dict, motion: dict, video_path: Path) -> dict:
         "landmarks_2d": _r(kp["image"][:, :, :2]),
         "visibility": _r(kp["visibility"], 2),
     }
+
+
+def video_size(path: Path) -> list[int]:
+    cap = cv2.VideoCapture(str(path))
+    size = [int(cap.get(cv2.CAP_PROP_FRAME_WIDTH)), int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))]
+    cap.release()
+    return size
 
 
 def body_geoms(model: mujoco.MjModel) -> list[int]:
@@ -240,6 +243,24 @@ def get_result(job_id: str):
     if not path.exists():
         raise HTTPException(404, "Result not ready")
     return FileResponse(path, media_type="application/json")
+
+
+@app.get("/api/jobs/{job_id}/reference")
+def get_reference(job_id: str):
+    """MediaPipe landmarks of a finished job, for scoring a webcam against it on /livedemo."""
+    job = _job(job_id)
+    path = job.dir / "keypoints.npz"
+    if job.status != "done" or not path.exists():
+        raise HTTPException(404, "Keypoints not ready")
+    kp = np.load(path)
+    return {
+        "fps": float(kp["fps"]),
+        "n_frames": len(kp["visibility"]),
+        "video_size": video_size(job.dir / job.video),
+        "world": _r(kp["world"], 3),  # NaN (no detection) -> null
+        "image": _r(kp["image"][:, :, :2], 4),
+        "visibility": _r(kp["visibility"], 2),
+    }
 
 
 @app.get("/api/jobs/{job_id}/video")
@@ -332,6 +353,11 @@ def index():
     return FileResponse(STATIC_DIR / "index.html")
 
 
+@app.get("/livedemo")
+def livedemo():
+    return FileResponse(STATIC_DIR / "livedemo.html")
+
+
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
 
@@ -339,11 +365,16 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8000)
+    # Browsers only allow webcam access on https pages (or localhost), so serving to other devices
+    # on the network (e.g. /livedemo at http://<ip>:8000) needs a certificate.
+    parser.add_argument("--ssl-certfile", help="serve over https with this certificate (PEM)")
+    parser.add_argument("--ssl-keyfile", help="private key for --ssl-certfile (PEM)")
     args = parser.parse_args()
     JOBS_DIR.mkdir(exist_ok=True)
     load_saved_jobs()
-    print(f"Open http://{args.host}:{args.port}")
-    uvicorn.run(app, host=args.host, port=args.port)
+    scheme = "https" if args.ssl_certfile else "http"
+    print(f"Open {scheme}://{args.host}:{args.port}  (live demo: {scheme}://{args.host}:{args.port}/livedemo)")
+    uvicorn.run(app, host=args.host, port=args.port, ssl_certfile=args.ssl_certfile, ssl_keyfile=args.ssl_keyfile)
 
 
 if __name__ == "__main__":

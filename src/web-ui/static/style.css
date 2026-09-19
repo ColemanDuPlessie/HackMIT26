@@ -141,6 +141,7 @@ button:disabled { opacity: 0.45; cursor: not-allowed; }
 .tabs { display: flex; gap: 6px; margin-top: 16px; }
 .tabs button { border-radius: 999px; padding: 6px 16px; color: var(--muted); }
 .tabs button[aria-selected="true"] { color: var(--text); border-color: var(--accent); background: #1c2633; }
+.tabs .tab-link { margin-left: auto; border-radius: 999px; padding: 6px 16px; color: var(--muted); }
 
 .live-bar { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 14px; }
 .live-bar label:not(.toggle) { display: flex; flex-direction: column; gap: 4px; color: var(--muted); font-size: 13px; }

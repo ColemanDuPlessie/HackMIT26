@@ -1,0 +1,78 @@
+/* /livedemo: the page background is a horizontal meter that fills with the pose-match score. */
+
+#meter {
+  position: fixed;
+  inset: 0;
+  z-index: 0;
+  background: var(--bg);
+  overflow: hidden;
+}
+#meter-fill {
+  --score: 0;
+  position: absolute;
+  inset: 0;
+  transform-origin: left center;
+  transform: scaleX(var(--score));
+  /* Red at 0 through amber to green at 1. */
+  background: linear-gradient(90deg,
+    hsl(calc(var(--score) * 130) 70% 26%),
+    hsl(calc(var(--score) * 130) 75% 40%));
+  transition: transform 0.12s linear;
+}
+.meter-tick {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 1px;
+  background: rgba(255, 255, 255, 0.07);
+}
+
+header, main { position: relative; z-index: 1; }
+
+.demo-head { display: flex; align-items: flex-end; justify-content: space-between; gap: 16px; flex-wrap: wrap; }
+.score-readout { text-align: right; min-width: 150px; }
+.score-value {
+  font-size: 64px;
+  line-height: 1;
+  font-weight: 750;
+  font-variant-numeric: tabular-nums;
+  text-shadow: 0 2px 12px rgba(0, 0, 0, 0.5);
+}
+.score-label { color: var(--muted); font-size: 13px; }
+
+/* Let the meter show through the content. */
+.card, .panel {
+  background: rgba(23, 27, 33, 0.78);
+  backdrop-filter: blur(6px);
+}
+.status-line, .live-note { text-shadow: 0 1px 4px rgba(0, 0, 0, 0.6); }
+.live-note { color: var(--text); opacity: 0.75; }
+
+.setup-row { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 14px; }
+.setup-row label:not(.button) { display: flex; flex-direction: column; gap: 4px; color: var(--muted); font-size: 13px; }
+#job-select { min-width: 260px; max-width: 100%; }
+.or { color: var(--muted); padding-bottom: 8px; }
+#demo-progress { margin-top: 14px; }
+.progress-text { margin: 8px 0 0; color: var(--muted); font-size: 13px; }
+#demo-controls label:not(.toggle) { display: flex; flex-direction: column; gap: 4px; color: var(--muted); font-size: 13px; }
+
+#cam-stage.mirrored video, #cam-stage.mirrored canvas { transform: scaleX(-1); }
+#ref-overlay, #ghost-overlay, #cam-overlay { pointer-events: none; }
+
+.countdown {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  font-size: 120px;
+  font-weight: 800;
+  color: #fff;
+  background: rgba(0, 0, 0, 0.45);
+  text-shadow: 0 4px 24px rgba(0, 0, 0, 0.6);
+}
+
+@media (max-width: 800px) {
+  .score-readout { text-align: left; }
+  .score-value { font-size: 48px; }
+  #job-select { min-width: 0; width: 100%; }
+}

@@ -35,9 +35,10 @@ export function clearCanvas(canvas) {
 
 /**
  * landmarks: 33 [x, y] in normalized image coords (null entries allowed); visibility: 33 numbers;
- * videoSize: [width, height] of the source frames.
+ * videoSize: [width, height] of the source frames. `color` draws everything in one color instead
+ * of by side, and `lineWidth` scales the strokes and dots.
  */
-export function drawSkeleton(canvas, landmarks, visibility, videoSize) {
+export function drawSkeleton(canvas, landmarks, visibility, videoSize, { color = null, lineWidth = 3 } = {}) {
   const ctx = canvas.getContext('2d');
   ctx.clearRect(0, 0, canvas.width, canvas.height);
   if (!landmarks) return;
@@ -54,11 +55,11 @@ export function drawSkeleton(canvas, landmarks, visibility, videoSize) {
 
   ctx.save();
   ctx.scale(dpr, dpr);
-  ctx.lineWidth = 3;
+  ctx.lineWidth = lineWidth;
   ctx.lineCap = 'round';
   for (const [a, b] of CONNECTIONS) {
     if (!ok(a) || !ok(b)) continue;
-    ctx.strokeStyle = colorOf(a) === colorOf(b) ? colorOf(a) : COLOR_CENTER;
+    ctx.strokeStyle = color ?? (colorOf(a) === colorOf(b) ? colorOf(a) : COLOR_CENTER);
     const [x1, y1] = px(a);
     const [x2, y2] = px(b);
     ctx.beginPath();
@@ -69,9 +70,9 @@ export function drawSkeleton(canvas, landmarks, visibility, videoSize) {
   for (let i = 0; i < 33; i++) {
     if (!ok(i)) continue;
     const [x, y] = px(i);
-    ctx.fillStyle = colorOf(i);
+    ctx.fillStyle = color ?? colorOf(i);
     ctx.beginPath();
-    ctx.arc(x, y, 3.5, 0, 2 * Math.PI);
+    ctx.arc(x, y, lineWidth + 0.5, 0, 2 * Math.PI);
     ctx.fill();
   }
   ctx.restore();

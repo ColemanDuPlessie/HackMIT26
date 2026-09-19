@@ -18,11 +18,17 @@ const landmarkers = {};
 let lastTimestamp = 0;
 let geomsPromise = null;
 
-function getLandmarker(variant) {
+export function getLandmarker(variant) {
   filesetPromise ??= FilesetResolver.forVisionTasks(WASM_URL);
   landmarkers[variant] ??= filesetPromise.then((fileset) => createLandmarker(fileset, variant));
   landmarkers[variant].catch(() => { delete landmarkers[variant]; });
   return landmarkers[variant];
+}
+
+/** A detectForVideo timestamp (ms) for a frame captured at performance.now() == now. */
+export function nextTimestamp(now) {
+  lastTimestamp = Math.max(Math.round(now), lastTimestamp + 1);
+  return lastTimestamp;
 }
 
 async function createLandmarker(fileset, variant) {
@@ -208,8 +214,7 @@ export class LiveSession {
   }
 
   processFrame(now) {
-    const timestamp = Math.max(Math.round(now), lastTimestamp + 1);
-    lastTimestamp = timestamp;
+    const timestamp = nextTimestamp(now);
     const t0 = performance.now();
     const result = this.landmarker.detectForVideo(this.video, timestamp);
     if (this.warmedUp) this.stats.detect.add(performance.now() - t0);
@@ -315,7 +320,7 @@ export class LiveSession {
   }
 }
 
-function cameraErrorMessage(err) {
+export function cameraErrorMessage(err) {
   if (err?.name === 'NotAllowedError') return 'Camera permission was denied. Allow camera access for this page and try again.';
   if (err?.name === 'NotFoundError') return 'No camera was found.';
   if (err?.name === 'NotReadableError') return 'The camera is in use by another application.';
