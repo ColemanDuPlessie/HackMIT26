@@ -70,6 +70,10 @@ header, main { position: relative; z-index: 1; }
   background: rgba(0, 0, 0, 0.45);
   text-shadow: 0 4px 24px rgba(0, 0, 0, 0.6);
 }
+/* display: grid above would otherwise override the hidden attribute. */
+.countdown[hidden] {
+  display: none;
+}
 
 @media (max-width: 800px) {
   .score-readout { text-align: left; }
