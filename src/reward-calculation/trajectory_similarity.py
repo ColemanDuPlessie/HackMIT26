@@ -33,29 +33,55 @@ ANGLE_JOINTS = {
 }
 
 
-# Calibration values from our intentionally bad example
+# Calibration from the intentionally bad example
 BAD_TARGET_SCORE = 0.30
 
 POSITION_BAD_ERROR = 0.10640327391349057
 ANGLE_BAD_ERROR = 10.483409009823326
 TRAJECTORY_BAD_ERROR = 0.040978255094918876
 
-POSITION_SCALE = -POSITION_BAD_ERROR / np.log(BAD_TARGET_SCORE)
-ANGLE_SCALE = -ANGLE_BAD_ERROR / np.log(BAD_TARGET_SCORE)
-TRAJECTORY_SCALE = -TRAJECTORY_BAD_ERROR / np.log(BAD_TARGET_SCORE)
+
+POSITION_SCALE = (
+    -POSITION_BAD_ERROR / np.log(BAD_TARGET_SCORE)
+)
+
+ANGLE_SCALE = (
+    -ANGLE_BAD_ERROR / np.log(BAD_TARGET_SCORE)
+)
+
+TRAJECTORY_SCALE = (
+    -TRAJECTORY_BAD_ERROR / np.log(BAD_TARGET_SCORE)
+)
+
+
+# Small errors are tolerated before score starts dropping
+POSITION_TOLERANCE = 0.03
+ANGLE_TOLERANCE = 5.0
+TRAJECTORY_TOLERANCE = 0.01
 
 
 def calculate_angle(point_a, point_b, point_c):
     vector_1 = point_a - point_b
     vector_2 = point_c - point_b
 
-    denominator = np.linalg.norm(vector_1) * np.linalg.norm(vector_2)
+    denominator = (
+        np.linalg.norm(vector_1)
+        * np.linalg.norm(vector_2)
+    )
 
     if denominator == 0:
         return np.nan
 
-    cosine = np.dot(vector_1, vector_2) / denominator
-    cosine = np.clip(cosine, -1.0, 1.0)
+    cosine = (
+        np.dot(vector_1, vector_2)
+        / denominator
+    )
+
+    cosine = np.clip(
+        cosine,
+        -1.0,
+        1.0
+    )
 
     angle = np.arccos(cosine)
 
@@ -69,6 +95,7 @@ def get_joint_angles(poses):
         frame_angles = []
 
         for name, (a, b, c) in ANGLE_JOINTS.items():
+
             angle = calculate_angle(
                 frame[a],
                 frame[b],
@@ -83,8 +110,12 @@ def get_joint_angles(poses):
 
 
 def get_joint_weights(reference):
-    # See which joints move the most in the reference dance
-    reference_motion = np.diff(reference, axis=0)
+
+    # How much each joint moves in the reference dance
+    reference_motion = np.diff(
+        reference,
+        axis=0
+    )
 
     movement_amount = np.linalg.norm(
         reference_motion,
@@ -97,29 +128,52 @@ def get_joint_weights(reference):
     )
 
     if np.max(joint_activity) > 0:
-        normalized_activity = (
-            joint_activity / np.max(joint_activity)
-        )
-    else:
-        normalized_activity = np.zeros_like(joint_activity)
 
-    # Every joint matters, but active joints matter more
+        normalized_activity = (
+            joint_activity
+            / np.max(joint_activity)
+        )
+
+    else:
+
+        normalized_activity = np.zeros_like(
+            joint_activity
+        )
+
+    # Every joint matters, active joints matter more
     BASE_WEIGHT = 1.0
     ACTIVITY_WEIGHT = 1.0
 
-    return BASE_WEIGHT + ACTIVITY_WEIGHT * normalized_activity
+    joint_weights = (
+        BASE_WEIGHT
+        + ACTIVITY_WEIGHT
+        * normalized_activity
+    )
+
+    return joint_weights
 
 
 def position_similarity(reference, generated):
-    reference = np.asarray(reference, dtype=float)
-    generated = np.asarray(generated, dtype=float)
+
+    reference = np.asarray(
+        reference,
+        dtype=float
+    )
+
+    generated = np.asarray(
+        generated,
+        dtype=float
+    )
 
     if reference.shape != generated.shape:
         raise ValueError(
-            f"Shape mismatch: {reference.shape} vs {generated.shape}"
+            f"Shape mismatch: "
+            f"{reference.shape} vs {generated.shape}"
         )
 
-    joint_weights = get_joint_weights(reference)
+    joint_weights = get_joint_weights(
+        reference
+    )
 
     distances = np.linalg.norm(
         reference - generated,
@@ -134,50 +188,100 @@ def position_similarity(reference, generated):
         )
     )
 
-    # Exponential scaling based on our calibration example
-    similarity = np.exp(
-        -position_error / POSITION_SCALE
+    # Ignore very small position errors
+    effective_error = max(
+        0.0,
+        position_error
+        - POSITION_TOLERANCE
     )
 
-    return similarity, position_error
+    similarity = np.exp(
+        -effective_error
+        / POSITION_SCALE
+    )
+
+    return (
+        similarity,
+        position_error
+    )
 
 
 def angle_similarity(reference, generated):
-    reference_angles = get_joint_angles(reference)
-    generated_angles = get_joint_angles(generated)
+
+    reference_angles = get_joint_angles(
+        reference
+    )
+
+    generated_angles = get_joint_angles(
+        generated
+    )
 
     angle_errors = np.abs(
-        reference_angles - generated_angles
+        reference_angles
+        - generated_angles
     )
 
-    angle_error = np.nanmean(angle_errors)
+    angle_error = np.nanmean(
+        angle_errors
+    )
+
+    # Ignore very small angle differences
+    effective_error = max(
+        0.0,
+        angle_error
+        - ANGLE_TOLERANCE
+    )
 
     similarity = np.exp(
-        -angle_error / ANGLE_SCALE
+        -effective_error
+        / ANGLE_SCALE
     )
 
-    return similarity, angle_error
+    return (
+        similarity,
+        angle_error
+    )
 
 
 def trajectory_similarity(reference, generated):
-    reference = np.asarray(reference, dtype=float)
-    generated = np.asarray(generated, dtype=float)
+
+    reference = np.asarray(
+        reference,
+        dtype=float
+    )
+
+    generated = np.asarray(
+        generated,
+        dtype=float
+    )
 
     if reference.shape != generated.shape:
         raise ValueError(
-            f"Shape mismatch: {reference.shape} vs {generated.shape}"
+            f"Shape mismatch: "
+            f"{reference.shape} vs {generated.shape}"
         )
 
-    # Compare frame-to-frame movement
-    reference_motion = np.diff(reference, axis=0)
-    generated_motion = np.diff(generated, axis=0)
+    # Movement between frames
+    reference_motion = np.diff(
+        reference,
+        axis=0
+    )
 
+    generated_motion = np.diff(
+        generated,
+        axis=0
+    )
+
+    # Difference in movement vectors
     motion_errors = np.linalg.norm(
-        reference_motion - generated_motion,
+        reference_motion
+        - generated_motion,
         axis=2
     )
 
-    joint_weights = get_joint_weights(reference)
+    joint_weights = get_joint_weights(
+        reference
+    )
 
     trajectory_error = np.average(
         motion_errors,
@@ -187,11 +291,22 @@ def trajectory_similarity(reference, generated):
         )
     )
 
-    similarity = np.exp(
-        -trajectory_error / TRAJECTORY_SCALE
+    # Ignore tiny movement differences
+    effective_error = max(
+        0.0,
+        trajectory_error
+        - TRAJECTORY_TOLERANCE
     )
 
-    return similarity, trajectory_error
+    similarity = np.exp(
+        -effective_error
+        / TRAJECTORY_SCALE
+    )
+
+    return (
+        similarity,
+        trajectory_error
+    )
 
 
 def align_timing(
@@ -200,10 +315,20 @@ def align_timing(
     fps,
     max_shift_seconds=1.0
 ):
-    reference = np.asarray(reference, dtype=float)
-    generated = np.asarray(generated, dtype=float)
 
-    max_shift_frames = int(max_shift_seconds * fps)
+    reference = np.asarray(
+        reference,
+        dtype=float
+    )
+
+    generated = np.asarray(
+        generated,
+        dtype=float
+    )
+
+    max_shift_frames = int(
+        max_shift_seconds * fps
+    )
 
     max_shift_frames = min(
         max_shift_frames,
@@ -211,7 +336,9 @@ def align_timing(
         len(generated) - 1
     )
 
-    joint_weights = get_joint_weights(reference)
+    joint_weights = get_joint_weights(
+        reference
+    )
 
     best_error = np.inf
     best_shift = 0
@@ -219,23 +346,26 @@ def align_timing(
     best_reference = reference
     best_generated = generated
 
-    # Try different global timing shifts
+    # Try shifting the player early/late
     for shift in range(
         -max_shift_frames,
         max_shift_frames + 1
     ):
 
         if shift > 0:
+
             ref_part = reference[:-shift]
             gen_part = generated[shift:]
 
         elif shift < 0:
+
             amount = -shift
 
             ref_part = reference[amount:]
             gen_part = generated[:-amount]
 
         else:
+
             ref_part = reference
             gen_part = generated
 
@@ -253,16 +383,21 @@ def align_timing(
         )
 
         if error < best_error:
+
             best_error = error
             best_shift = shift
+
             best_reference = ref_part
             best_generated = gen_part
 
-    timing_error_seconds = abs(best_shift) / fps
+    timing_error_seconds = (
+        abs(best_shift) / fps
+    )
 
-    # Still temporary until we have timing calibration examples
-    timing_similarity = 1 / (
-        1 + timing_error_seconds
+    # Still temporary until we calibrate timing
+    timing_similarity = (
+        1
+        / (1 + timing_error_seconds)
     )
 
     return (
@@ -274,7 +409,11 @@ def align_timing(
     )
 
 
-def dance_similarity(reference, generated, fps):
+def dance_similarity(
+    reference,
+    generated,
+    fps
+):
 
     (
         aligned_reference,
@@ -288,22 +427,31 @@ def dance_similarity(reference, generated, fps):
         fps
     )
 
-    position_score, position_error = position_similarity(
+    (
+        position_score,
+        position_error
+    ) = position_similarity(
         aligned_reference,
         aligned_generated
     )
 
-    angle_score, angle_error = angle_similarity(
+    (
+        angle_score,
+        angle_error
+    ) = angle_similarity(
         aligned_reference,
         aligned_generated
     )
 
-    trajectory_score, trajectory_error = trajectory_similarity(
+    (
+        trajectory_score,
+        trajectory_error
+    ) = trajectory_similarity(
         aligned_reference,
         aligned_generated
     )
 
-    # Equal weights for now
+    # Equal weighting for now
     position_weight = 0.25
     angle_weight = 0.25
     trajectory_weight = 0.25
@@ -311,27 +459,43 @@ def dance_similarity(reference, generated, fps):
 
     # Weighted geometric mean
     final_score = (
-        (position_score ** position_weight)
-        * (angle_score ** angle_weight)
-        * (trajectory_score ** trajectory_weight)
-        * (timing_score ** timing_weight)
+        position_score ** position_weight
+        * angle_score ** angle_weight
+        * trajectory_score ** trajectory_weight
+        * timing_score ** timing_weight
     )
 
     return {
-        "final_score": final_score,
 
-        "position_score": position_score,
-        "position_error": position_error,
+        "final_score":
+            final_score,
 
-        "angle_score": angle_score,
-        "angle_error_degrees": angle_error,
+        "position_score":
+            position_score,
 
-        "trajectory_score": trajectory_score,
-        "trajectory_error": trajectory_error,
+        "position_error":
+            position_error,
 
-        "timing_score": timing_score,
-        "timing_shift_frames": shift,
-        "timing_error_seconds": timing_error
+        "angle_score":
+            angle_score,
+
+        "angle_error_degrees":
+            angle_error,
+
+        "trajectory_score":
+            trajectory_score,
+
+        "trajectory_error":
+            trajectory_error,
+
+        "timing_score":
+            timing_score,
+
+        "timing_shift_frames":
+            shift,
+
+        "timing_error_seconds":
+            timing_error
     }
 
 
@@ -355,13 +519,27 @@ if __name__ == "__main__":
     reference = best_data["world"]
     worst = worst_data["world"]
 
-    fps = float(best_data["fps"])
+    fps = float(
+        best_data["fps"]
+    )
 
-    print("Reference shape:", reference.shape)
-    print("Worst shape:", worst.shape)
-    print("FPS:", fps)
+    print(
+        "Reference shape:",
+        reference.shape
+    )
 
-    # Perfect match
+    print(
+        "Worst shape:",
+        worst.shape
+    )
+
+    print(
+        "FPS:",
+        fps
+    )
+
+
+    # Perfect reference test
     perfect_result = dance_similarity(
         reference,
         reference,
@@ -371,9 +549,14 @@ if __name__ == "__main__":
     print("\nBEST VS BEST")
 
     for key, value in perfect_result.items():
-        print(key, ":", value)
+        print(
+            key,
+            ":",
+            value
+        )
 
-    # Intentionally bad motion
+
+    # Bad motion test
     worst_result = dance_similarity(
         reference,
         worst,
@@ -383,4 +566,8 @@ if __name__ == "__main__":
     print("\nBEST VS WORST")
 
     for key, value in worst_result.items():
-        print(key, ":", value)
+        print(
+            key,
+            ":",
+            value
+        )
