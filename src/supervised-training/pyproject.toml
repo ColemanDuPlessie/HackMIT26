@@ -1,0 +1,18 @@
+[project]
+name = "supervised-training"
+version = "0.1.0"
+description = "Music -> dance: supervised sequence model over MediaPipe world landmarks"
+requires-python = ">=3.10,<3.13"
+dependencies = [
+    "pose-estimation",
+    "numpy",
+    "torch",
+    "librosa",
+    "soundfile",
+]
+
+[tool.uv]
+package = false
+
+[tool.uv.sources]
+pose-estimation = { path = "../pose-estimation", editable = true }
