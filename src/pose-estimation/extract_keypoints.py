@@ -14,6 +14,7 @@ Frames with no detection are NaN in world/image and 0 in visibility.
 import argparse
 import urllib.request
 from pathlib import Path
+from typing import Callable
 
 import cv2
 import mediapipe as mp
@@ -38,7 +39,9 @@ def ensure_model(variant: str) -> Path:
     return path
 
 
-def extract(video_path: str, model_path: Path) -> dict:
+def extract(video_path: str, model_path: Path,
+            progress: Callable[[int, int], None] | None = None) -> dict:
+    """Run MediaPipe on every frame. `progress(done, total)` is called per frame if given."""
     opts = PoseLandmarkerOptions(
         base_options=BaseOptions(model_asset_path=str(model_path), delegate=BaseOptions.Delegate.CPU),
         running_mode=RunningMode.VIDEO,
@@ -48,6 +51,7 @@ def extract(video_path: str, model_path: Path) -> dict:
     if not cap.isOpened():
         raise FileNotFoundError(f"Could not open video: {video_path}")
     fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
+    total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
 
     world, image, vis = [], [], []
     with PoseLandmarker.create_from_options(opts) as landmarker:
@@ -69,6 +73,8 @@ def extract(video_path: str, model_path: Path) -> dict:
                 image.append(np.full((NUM_LANDMARKS, 3), np.nan))
                 vis.append(np.zeros(NUM_LANDMARKS))
             i += 1
+            if progress:
+                progress(i, max(total, i))
     cap.release()
 
     vis = np.asarray(vis, dtype=np.float32)

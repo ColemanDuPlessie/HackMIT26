@@ -37,6 +37,16 @@ The overlay shows frame, time, speed and IK error. Other flags: `--speed`, `--no
 `motion.npz` contains `qpos (T, nq)`, `targets (T, 33, 3)`, per-frame IK `error`, `fps`, and `joint_names`.
 Green spheres in the render/viewer are the IK targets.
 
+## Using from Python
+
+The package is installable (`web-ui` uses it as an editable dependency). Main entry points:
+
+```python
+import extract_keypoints, retarget
+kp = extract_keypoints.extract("input.mp4", extract_keypoints.ensure_model("full"), progress=print)
+motion = retarget.retarget(kp, smooth=0.2, progress=print)   # same contents as motion.npz
+```
+
 ## Files
 
 - `extract_keypoints.py`: runs MediaPipe in VIDEO mode, saves hip-centered metric world landmarks,

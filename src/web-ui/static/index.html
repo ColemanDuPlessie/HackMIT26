@@ -1,0 +1,105 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Video to MuJoCo Pose</title>
+  <link rel="stylesheet" href="/static/style.css">
+  <script type="importmap">
+    {
+      "imports": {
+        "three": "https://cdn.jsdelivr.net/npm/three@0.170.0/build/three.module.js",
+        "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.170.0/examples/jsm/"
+      }
+    }
+  </script>
+</head>
+<body>
+  <header>
+    <h1>Video → MuJoCo pose</h1>
+    <p class="sub">Upload a video of one person. MediaPipe finds their 3D pose in each frame and IK fits it to a MuJoCo humanoid.</p>
+  </header>
+
+  <main>
+    <section class="card" id="upload-card">
+      <form id="upload-form">
+        <label id="drop-zone" for="file-input">
+          <input type="file" id="file-input" accept="video/*,.mp4,.mov,.m4v,.webm,.avi,.mkv" hidden>
+          <span id="drop-text"><strong>Choose a video</strong> or drop it here</span>
+        </label>
+        <div class="options">
+          <label>Pose model
+            <select id="model-select">
+              <option value="lite">Lite (fastest)</option>
+              <option value="full" selected>Full</option>
+              <option value="heavy">Heavy (most accurate)</option>
+            </select>
+          </label>
+          <label>Smoothing
+            <select id="smooth-select">
+              <option value="0">Off</option>
+              <option value="0.1">0.1 s</option>
+              <option value="0.2" selected>0.2 s</option>
+              <option value="0.4">0.4 s</option>
+            </select>
+          </label>
+          <button type="submit" id="run-btn" disabled>Run pipeline</button>
+        </div>
+      </form>
+      <div id="progress" hidden>
+        <div class="progress-track"><div class="progress-fill" id="progress-fill"></div></div>
+        <p id="progress-text"></p>
+      </div>
+      <p id="error-text" class="error" hidden></p>
+    </section>
+
+    <section id="results" hidden>
+      <div class="result-head">
+        <h2 id="result-title"></h2>
+        <div class="downloads">
+          <a id="dl-keypoints" class="button secondary" download>keypoints.npz</a>
+          <a id="dl-motion" class="button secondary" download>motion.npz</a>
+        </div>
+      </div>
+
+      <div class="stats" id="stats"></div>
+
+      <div class="panels">
+        <figure class="panel">
+          <figcaption>Video + MediaPipe keypoints</figcaption>
+          <div class="stage" id="video-stage">
+            <video id="video" muted playsinline preload="auto"></video>
+            <canvas id="overlay"></canvas>
+            <p id="video-note" class="note" hidden>Your browser can't play this video format, so only the detected keypoints are shown.</p>
+          </div>
+        </figure>
+        <figure class="panel">
+          <figcaption>MuJoCo humanoid <span class="hint">drag to orbit · scroll to zoom</span></figcaption>
+          <div class="stage" id="three-stage"></div>
+        </figure>
+      </div>
+
+      <div class="controls">
+        <button id="play-btn" class="icon" aria-label="Play">▶</button>
+        <input type="range" id="scrubber" min="0" value="0" step="1" aria-label="Frame">
+        <span id="frame-label" class="mono"></span>
+        <select id="speed-select" aria-label="Playback speed">
+          <option value="0.25">0.25×</option>
+          <option value="0.5">0.5×</option>
+          <option value="1" selected>1×</option>
+          <option value="2">2×</option>
+        </select>
+        <label class="toggle"><input type="checkbox" id="show-keypoints" checked> Keypoints</label>
+        <label class="toggle"><input type="checkbox" id="show-targets" checked> IK targets</label>
+      </div>
+    </section>
+
+    <section class="card" id="history-card" hidden>
+      <h2>Previous runs</h2>
+      <ul id="history"></ul>
+    </section>
+  </main>
+
+  <script type="module" src="/static/app.js"></script>
+</body>
+</html>

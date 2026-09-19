@@ -1,0 +1,17 @@
+[project]
+name = "web-ui"
+version = "0.1.0"
+description = "Local web UI: upload a video, run the pose-estimation pipeline, view the result"
+requires-python = ">=3.10,<3.13"
+dependencies = [
+    "pose-estimation",
+    "fastapi",
+    "uvicorn",
+    "python-multipart",
+]
+
+[tool.uv]
+package = false
+
+[tool.uv.sources]
+pose-estimation = { path = "../pose-estimation", editable = true }

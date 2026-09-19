@@ -24,6 +24,7 @@ Output .npz contents:
 import argparse
 import time
 from pathlib import Path
+from typing import Callable, Mapping
 
 import mink
 import mujoco
@@ -134,7 +135,8 @@ def root_quat_from_targets(t: np.ndarray) -> np.ndarray:
 
 
 def solve(model: mujoco.MjModel, targets: np.ndarray, visibility: np.ndarray,
-          iters: int = 20, first_iters: int = 200, posture_cost: float = 0.02) -> tuple[np.ndarray, np.ndarray]:
+          iters: int = 20, first_iters: int = 200, posture_cost: float = 0.02,
+          progress: Callable[[int, int], None] | None = None) -> tuple[np.ndarray, np.ndarray]:
     config = mink.Configuration(model)
     tasks = {i: mink.FrameTask(f"mp_{i}", "site", position_cost=BASE_COST[i], orientation_cost=0.0)
              for i in TRACKED}
@@ -166,7 +168,28 @@ def solve(model: mujoco.MjModel, targets: np.ndarray, visibility: np.ndarray,
                 break
         qpos[f] = config.q
         err[f] = np.linalg.norm(config.data.site_xpos[site_ids] - targets[f, TRACKED], axis=1).mean()
+        if progress:
+            progress(f + 1, len(targets))
     return qpos, err
+
+
+def retarget(keypoints: Mapping, model_path: str | Path = DEFAULT_MODEL, smooth: float = 0.2, iters: int = 20,
+             progress: Callable[[int, int], None] | None = None) -> dict:
+    """Full pipeline from extract_keypoints output to a motion dict (the contents of motion.npz)."""
+    fps = float(keypoints["fps"])
+    world = mp_to_mujoco(fill_missing(np.asarray(keypoints["world"], dtype=np.float64)))
+    visibility = keypoints["visibility"]
+    win = _savgol_window(len(world), fps, smooth) if smooth > 0 else 0
+    if win:
+        world = savgol_filter(world, win, 2, axis=0)
+
+    model = mujoco.MjModel.from_xml_path(str(model_path))
+    rest = rest_pose_sites(model)
+    targets = ground(rescale_skeleton(world, rest), rest, fps)
+    qpos, err = solve(model, targets, visibility, iters=iters, progress=progress)
+    return dict(qpos=qpos, targets=targets, error=err, fps=np.float32(fps),
+                joint_names=[model.joint(j).name for j in range(model.njnt)],
+                model_path=str(Path(model_path).resolve()))
 
 
 def main():
@@ -180,28 +203,16 @@ def main():
     parser.add_argument("--view", action="store_true", help="play back in the MuJoCo viewer (use mjpython on macOS)")
     args = parser.parse_args()
 
-    kp = np.load(args.keypoints)
-    fps = float(kp["fps"])
-    world = mp_to_mujoco(fill_missing(kp["world"].astype(np.float64)))
-    visibility = kp["visibility"]
-    win = _savgol_window(len(world), fps, args.smooth) if args.smooth > 0 else 0
-    if win:
-        world = savgol_filter(world, win, 2, axis=0)
-
-    model = mujoco.MjModel.from_xml_path(args.model)
-    rest = rest_pose_sites(model)
-    targets = ground(rescale_skeleton(world, rest), rest, fps)
-
     t0 = time.time()
-    qpos, err = solve(model, targets, visibility, iters=args.iters)
-    print(f"IK on {len(qpos)} frames in {time.time() - t0:.1f}s; "
+    motion = retarget(np.load(args.keypoints), args.model, smooth=args.smooth, iters=args.iters)
+    qpos, targets, err, fps = motion["qpos"], motion["targets"], motion["error"], float(motion["fps"])
+    print(f"Retargeted {len(qpos)} frames in {time.time() - t0:.1f}s; "
           f"mean site error {err.mean() * 100:.1f} cm (max {err.max() * 100:.1f} cm)")
-
-    joint_names = [model.joint(j).name for j in range(model.njnt)]
-    np.savez(args.output, qpos=qpos, targets=targets, error=err, fps=np.float32(fps),
-             joint_names=joint_names, model_path=str(Path(args.model).resolve()))
+    np.savez(args.output, **motion)
     print(f"Saved {args.output}")
 
+    if args.render or args.view:
+        model = mujoco.MjModel.from_xml_path(args.model)
     if args.render:
         visualize.render(model, qpos, targets, fps, args.render)
     if args.view:
