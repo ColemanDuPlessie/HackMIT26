@@ -3,7 +3,7 @@ from pathlib import Path
 
 
 # Z contributes 30% less than X and Y
-AXIS_WEIGHTS = np.array([1.0, 1.0, 0.7])
+AXIS_WEIGHTS = np.array([1.0, 1.0, 0.3])
 
 
 # MediaPipe joint indices
