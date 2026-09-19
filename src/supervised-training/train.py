@@ -37,7 +37,7 @@ from model import ModelConfig, MotionTransformer
 
 ROOT = Path(__file__).resolve().parent
 # Config that must not change between runs: the ledger and optimiser state assume them.
-FROZEN = ("window", "batch", "lr", "warmup", "total_steps")
+FROZEN = ("window", "batch", "lr")
 
 
 def model_config(args) -> ModelConfig:
@@ -132,9 +132,10 @@ def main():
                         help="window start spacing; 0 = no overlap, so each frame is trained on once")
     parser.add_argument("--batch", type=int, default=16)
     parser.add_argument("--lr", type=float, default=3e-4)
-    parser.add_argument("--warmup", type=int, default=200)
-    parser.add_argument("--total-steps", type=int, default=20000,
-                        help="horizon the cosine decay is shaped for, across all runs")
+    parser.add_argument("--warmup", type=int,
+                        help="LR warmup steps; default is 5%% of this run's planned steps")
+    parser.add_argument("--total-steps", type=int,
+                        help="horizon the cosine decay is shaped for; default is this run's planned steps")
     parser.add_argument("--noise", type=float, default=0.02, help="input pose noise, in normalised units")
     parser.add_argument("--w-vel", type=float, default=1.0, dest="w_vel")
     parser.add_argument("--w-acc", type=float, default=0.5, dest="w_acc")
@@ -216,6 +217,19 @@ def main():
     print(f"{len(clips_available)} prepared, {len(queue)} below the cap ({budget} passes left) "
           f"-> this run's budget: {args.minutes:.0f} min on {device}")
 
+    # A short run must not spend all of itself warming up, so scale the schedule to the work
+    # actually queued: passes left x windows per clip / batch. Clip lengths vary a little, so
+    # the validation clips stand in for the rest.
+    frames = int(np.median([len(c["motion"]) for c in val_clips]))
+    windows_per_clip = max(1, (frames - args.window) // args.stride + 1)
+    planned = max(1, budget * windows_per_clip // args.batch)
+    if args.warmup is None:
+        args.warmup = int(np.clip(round(0.05 * planned), 10, 500))
+    if args.total_steps is None:
+        args.total_steps = state["step"] + planned
+    print(f"~{planned} steps planned ({windows_per_clip} windows/clip): "
+          f"warmup {args.warmup}, cosine decay to step {args.total_steps}")
+
     # ---------------------------------------------------------------- train
     stop = {"now": False}
     signal.signal(signal.SIGINT, lambda *_: stop.update(now=True))
@@ -275,6 +289,7 @@ def main():
 
     # ---------------------------------------------------------------- finish
     minutes = (time.time() - run["started"]) / 60
+    state["config"]["schedule"] = {"warmup": args.warmup, "total_steps": args.total_steps}
     state["history"].append({"minutes": round(minutes, 1), "steps": run["steps"],
                              "passes": run["clips"], "final_train_loss": run["loss"],
                              "best_val": state["best_val"], "ended": time.strftime("%Y-%m-%d %H:%M")})

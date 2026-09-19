@@ -62,8 +62,10 @@ uv run generate.py some_song.mp3 --retarget danced_motion.npz
 - **Resuming is the default.** Re-running the same command continues from
   `checkpoints/checkpoint.pt`: same step count, same optimiser state, same LR schedule,
   same held-out validation clips, and it automatically picks up clips prepared since.
-  `--fresh` starts over. The learning rate is derived from the global step
-  (warmup then cosine toward `--total-steps`), so a run that stops early doesn't distort it.
+  `--fresh` starts over. The learning rate is derived from the global step (warmup then cosine),
+  so a run that stops early doesn't distort it. Both the warmup and the decay horizon default to
+  the size of the work queued for the run -- a 200-step run would otherwise spend all of itself
+  warming up -- and `--warmup` / `--total-steps` override them.
 - **Outputs:** `checkpoint.pt` (resumable, includes optimiser + ledger), `model.pt` (the final
   weights, what `generate.py` and `evaluate.py` read) and `best.pt` (best validation loss).
 
