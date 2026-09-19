@@ -29,6 +29,11 @@ const SMOOTH_TAU = 0.25; // seconds; time constant of the meter's smoothing
 const COUNTDOWN_S = 3;
 const GHOST_COLOR = 'rgba(255, 255, 255, 0.75)';
 const MIN_RECORDING_S = 1;
+// dance_similarity mode: webcam history kept (s; the server compares the last 2 s), how often it's
+// sent (ms), and how long a server score stays valid (ms).
+const DANCE_HISTORY_S = 2.5;
+const DANCE_REQUEST_MS = 200;
+const DANCE_STALE_MS = 1000;
 // Webcam clips recorded here or on the main page's Live tab. They're shown mirrored, the way the
 // user saw themselves while recording, and scored unmirrored: repeat your own moves.
 const SELF_RECORDING = /^(me|webcam)-/;
@@ -131,6 +136,8 @@ let run = { sum: 0, count: 0 }; // raw scores while the video plays, for the fin
 let finalScore = null;
 let countdownToken = 0;
 let counting = false;
+// dance_similarity mode: recent webcam poses as {t: video time, world}, and the latest server result.
+const dance = { buffer: [], inFlight: false, sentAt: 0, latest: null, latestAt: 0 };
 const rec = { recorder: null, chunks: [], startedAt: 0, token: 0, counting: false, timer: null };
 
 // ---------------------------------------------------------------- reference video
@@ -218,6 +225,7 @@ async function loadReference(jobId) {
   refVideo.src = `/api/jobs/${jobId}/video`;
   refVideo.playbackRate = Number($('demo-speed').value);
   resetRun();
+  resetDance();
   $('play-btn').disabled = false;
   $('restart-btn').disabled = false;
   setStatus(cam.on ? `Ready. Press Play and copy ${ref.self ? 'yourself' : 'the dancer'}.` : 'Ready. Start the camera, then press Play.');
@@ -404,6 +412,7 @@ function processCameraFrame(now) {
     raw = score;
     hint = score === null ? 'show more of your body' : 'match';
     if (score === null && Math.max(...frames[frame].vis) < MIN_VISIBILITY) hint = 'dancer not in view';
+    if ($('score-method').value === 'dance') ({ raw, hint } = danceScore(user.world, now));
     const points = $('show-ghost').checked && fitGhost(frames[frame], ref.size, image, vis, camSize);
     if (points) ghost = { points, vis: frames[frame].vis };
   }
@@ -422,6 +431,86 @@ function processCameraFrame(now) {
     run.sum += raw ?? 0;
     run.count++;
   }
+}
+
+// ---------------------------------------------------------------- dance_similarity scoring
+
+$('score-method').addEventListener('change', resetDance);
+$('mirror-moves').addEventListener('change', resetDance);
+
+function resetDance() {
+  dance.buffer = [];
+  dance.latest = null;
+  $('score-detail').textContent = '';
+}
+
+/**
+ * Buffer this webcam pose and return the latest server score as {raw, hint}. The server's
+ * dance_similarity compares whole motion windows, so this only scores while the video plays.
+ */
+function danceScore(world, now) {
+  const t = refVideo.currentTime;
+  if (counting || refVideo.paused) {
+    dance.buffer = [];
+    return { raw: null, hint: 'press Play to score' };
+  }
+  const buf = dance.buffer;
+  if (buf.length && t < buf[buf.length - 1].t) buf.length = 0; // restarted
+  // dance_similarity has no mirror option; mirroring the user is equivalent to mirroring the dancer.
+  const pose = $('mirror-moves').checked
+    ? world.map((_, i) => { const p = world[SWAP[i]]; return [-p[0], p[1], p[2]]; })
+    : world;
+  if (!buf.length || t > buf[buf.length - 1].t) buf.push({ t, world: pose });
+  while (buf.length && buf[0].t < t - DANCE_HISTORY_S) buf.shift();
+  if (!dance.inFlight && now - dance.sentAt >= DANCE_REQUEST_MS && buf.length >= 2) requestDanceScore(t);
+
+  const latest = now - dance.latestAt < DANCE_STALE_MS ? dance.latest : null;
+  if (!latest) return { raw: null, hint: 'scoring…' };
+  if (latest.final_score === null) return { raw: null, hint: latest.reason };
+  return { raw: latest.final_score, hint: 'match' };
+}
+
+async function requestDanceScore(t) {
+  const jobId = ref.jobId;
+  dance.inFlight = true;
+  dance.sentAt = performance.now();
+  const round = (x) => Math.round(x * 1e4) / 1e4;
+  const body = {
+    t,
+    times: dance.buffer.map((s) => s.t),
+    world: dance.buffer.map((s) => s.world.map((p) => p.map(round))),
+  };
+  try {
+    const res = await fetch(`/api/jobs/${jobId}/dance-similarity`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    });
+    const result = await res.json();
+    if (!res.ok) throw new Error(result.detail || res.statusText);
+    if (ref?.jobId === jobId) {
+      dance.latest = result;
+      dance.latestAt = performance.now();
+    }
+  } catch (err) {
+    console.warn('dance_similarity request failed:', err);
+  } finally {
+    dance.inFlight = false;
+  }
+}
+
+function renderDanceDetail() {
+  const el = $('score-detail');
+  const r = dance.latest;
+  if ($('score-method').value !== 'dance' || !r || r.final_score === null
+      || performance.now() - dance.latestAt > DANCE_STALE_MS) {
+    el.textContent = '';
+    return;
+  }
+  const pct = (x) => `${Math.round(x * 100)}%`;
+  el.textContent = `dance_similarity over ${r.window_s} s · position ${pct(r.position_score)} (${(r.position_error * 100).toFixed(1)} cm)`
+    + ` · angles ${pct(r.angle_score)} (${r.angle_error_degrees.toFixed(1)}°)`
+    + ` · trajectory ${pct(r.trajectory_score)} · timing ${pct(r.timing_score)} (${r.timing_error_seconds.toFixed(2)} s off)`;
 }
 
 // ---------------------------------------------------------------- recording yourself
@@ -534,6 +623,7 @@ function render() {
   $('meter-fill').style.setProperty('--score', (value ?? 0).toFixed(3));
   $('score-value').textContent = value === null ? '–' : `${Math.round(value * 100)}%`;
   $('score-label').textContent = label;
+  renderDanceDetail();
   requestAnimationFrame(render);
 }
 

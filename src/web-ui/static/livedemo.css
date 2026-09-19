@@ -45,6 +45,7 @@ header, main { position: relative; z-index: 1; }
   background: rgba(23, 27, 33, 0.78);
   backdrop-filter: blur(6px);
 }
+.score-detail { margin: -6px 0 12px; min-height: 1.4em; color: var(--muted); text-shadow: 0 1px 4px rgba(0, 0, 0, 0.6); }
 .status-line, .live-note { text-shadow: 0 1px 4px rgba(0, 0, 0, 0.6); }
 .live-note { color: var(--text); opacity: 0.75; }
 

@@ -75,12 +75,19 @@
           <option value="1" selected>1×</option>
         </select>
       </label>
+      <label title="Pose match scores each webcam frame in the browser. dance_similarity runs the reward function from src/reward-calculation on the server over the last 2 s of motion.">Scoring
+        <select id="score-method">
+          <option value="pose" selected>Pose match (per frame)</option>
+          <option value="dance">dance_similarity (2 s window)</option>
+        </select>
+      </label>
       <label class="toggle" title="Move like a mirror image of the dancer: raise your left arm when they raise their right">
         <input type="checkbox" id="mirror-moves" checked> Mirror the dancer
       </label>
       <label class="toggle"><input type="checkbox" id="show-ghost" checked> Show dancer on me</label>
     </section>
     <p id="demo-status" class="status-line"></p>
+    <p id="score-detail" class="mono score-detail"></p>
 
     <div class="panels">
       <figure class="panel">

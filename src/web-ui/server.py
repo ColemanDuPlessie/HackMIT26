@@ -12,19 +12,21 @@ survive server restarts.
 import argparse
 import json
 import shutil
+import sys
 import threading
 import time
 import traceback
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import asdict, dataclass, field, fields
+from functools import lru_cache
 from pathlib import Path
 
 import cv2
 import mujoco
 import numpy as np
 import uvicorn
-from fastapi import FastAPI, File, Form, HTTPException, UploadFile, WebSocket, WebSocketDisconnect
+from fastapi import Body, FastAPI, File, Form, HTTPException, UploadFile, WebSocket, WebSocketDisconnect
 from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
@@ -33,12 +35,20 @@ import extract_keypoints
 import retarget
 
 ROOT = Path(__file__).parent
+# The reward code is a plain script folder rather than a package, so import it by path.
+sys.path.insert(0, str(ROOT.parent / "reward-calculation"))
+import trajectory_similarity  # noqa: E402
 JOBS_DIR = ROOT / "jobs"
 STATIC_DIR = ROOT / "static"
 VIDEO_EXTS = {".mp4", ".mov", ".m4v", ".webm", ".avi", ".mkv"}
 DOWNLOADS = {"keypoints.npz", "motion.npz"}
 # Share of the progress bar given to landmark extraction; IK takes the rest.
 EXTRACT_SHARE = 0.85
+# /livedemo's dance_similarity scoring: seconds of recent motion compared per request, the
+# shortest window worth scoring, and the longest gap in webcam frames that is interpolated over.
+DANCE_WINDOW_S = 2.0
+DANCE_MIN_WINDOW_S = 0.5
+DANCE_MAX_GAP_S = 0.3
 # Live smoothing presets -> One-Euro min_cutoff (Hz); lower is smoother but laggier.
 LIVE_SMOOTHING = {"low": 3.0, "medium": 1.5, "high": 0.7}
 GEOM_TYPES = {mujoco.mjtGeom.mjGEOM_CAPSULE: "capsule", mujoco.mjtGeom.mjGEOM_BOX: "box",
@@ -261,6 +271,75 @@ def get_reference(job_id: str):
         "image": _r(kp["image"][:, :, :2], 4),
         "visibility": _r(kp["visibility"], 2),
     }
+
+
+@lru_cache(maxsize=8)
+def reference_world(job_id: str) -> tuple[np.ndarray, float]:
+    kp = np.load(_job(job_id).dir / "keypoints.npz")
+    return kp["world"].astype(np.float64), float(kp["fps"])
+
+
+@app.post("/api/jobs/{job_id}/dance-similarity")
+def score_dance(job_id: str, body: dict = Body(...)):
+    """Score recent webcam motion with reward-calculation's dance_similarity.
+
+    Body: {"t": video time (s), "times": [video time of each webcam frame],
+           "world": [[[x, y, z] * 33] per frame]}  (MediaPipe world landmarks, already mirrored if wanted)
+    The webcam frames are resampled onto the reference's frame times over the last DANCE_WINDOW_S
+    seconds before t, and compared with the same reference frames. Returns dance_similarity's
+    result, or {"final_score": null, "reason"} when there isn't enough to compare.
+    """
+    job = _job(job_id)
+    if job.status != "done" or not (job.dir / "keypoints.npz").exists():
+        raise HTTPException(404, "Keypoints not ready")
+    try:
+        t = float(body["t"])
+        times = np.asarray(body["times"], dtype=np.float64)
+        world = np.asarray(body["world"], dtype=np.float64)
+    except (KeyError, TypeError, ValueError) as e:
+        raise HTTPException(400, f"Bad request body: {e}")
+    if world.ndim != 3 or world.shape[1:] != (33, 3) or times.shape != (len(world),):
+        raise HTTPException(400, "world must be (frames, 33, 3) with one time per frame")
+    if not (np.isfinite(world).all() and np.isfinite(times).all()):
+        raise HTTPException(400, "times and world must be finite")
+
+    ref, fps = reference_world(job_id)
+    order = np.argsort(times, kind="stable")
+    times, world = times[order], world[order]
+    if len(times) < 2:
+        return {"final_score": None, "reason": "not enough webcam frames"}
+
+    # Reference frames in the window that the webcam samples cover without long gaps.
+    start = max(t - DANCE_WINDOW_S, times[0] - 1 / fps)
+    end = min(t, times[-1] + 1 / fps)
+    frames = np.arange(max(0, int(np.ceil(start * fps))), min(len(ref) - 1, int(end * fps)) + 1)
+    if len(frames) < DANCE_MIN_WINDOW_S * fps:
+        return {"final_score": None, "reason": "warming up"}
+    frame_times = frames / fps
+    in_window = (times >= frame_times[0] - DANCE_MAX_GAP_S) & (times <= frame_times[-1] + DANCE_MAX_GAP_S)
+    if np.diff(times[in_window]).max(initial=0) > DANCE_MAX_GAP_S:
+        return {"final_score": None, "reason": "lost track of you"}
+
+    flat = world.reshape(len(world), -1)
+    generated = np.stack([np.interp(frame_times, times, flat[:, c]) for c in range(flat.shape[1])], axis=1)
+    generated = generated.reshape(len(frames), 33, 3)
+
+    reference = ref[frames]
+    valid = np.isfinite(reference).all(axis=(1, 2))
+    if valid.mean() < 0.5:
+        return {"final_score": None, "reason": "dancer not in view"}
+    if not valid.all():  # fill frames where the dancer wasn't detected
+        idx = np.flatnonzero(valid)
+        ref_flat = reference[valid].reshape(len(idx), -1)
+        reference = np.stack([np.interp(np.arange(len(frames)), idx, ref_flat[:, c])
+                              for c in range(ref_flat.shape[1])], axis=1).reshape(len(frames), 33, 3)
+
+    result = trajectory_similarity.dance_similarity(reference, generated, fps)
+    if not np.isfinite(result["final_score"]):
+        return {"final_score": None, "reason": "could not score"}
+    out = {k: (int(v) if k == "timing_shift_frames" else round(float(v), 4)) for k, v in result.items()}
+    out["window_s"] = round(len(frames) / fps, 2)
+    return out
 
 
 @app.get("/api/jobs/{job_id}/video")

@@ -60,6 +60,11 @@ pose, detected live in the browser by MediaPipe, is scored against the dancer's 
 - **Score:** the direction of each arm, leg and torso bone (3D world landmarks) is compared with the dancer's;
   arms count most. The best match within the last 0.4 s of video is used, so reaction lag isn't punished.
   When the video ends the page shows your average. Tuning constants are at the top of `static/livedemo.js`.
+- **Scoring: dance_similarity** switches to the reward function in `../reward-calculation/trajectory_similarity.py`
+  (imported by path, so edits there apply after a server restart). About 5 times a second the page sends the
+  last 2 s of webcam landmarks to `POST /api/jobs/{id}/dance-similarity`; the server resamples them onto the
+  dancer's frame times and returns the final score plus its position, angle, trajectory and timing parts,
+  shown under the status line. It only scores while the video plays.
 - **Mirror the dancer** (on by default) scores you as a mirror image, like dance games: raise your left arm
   when they raise their right. **Show dancer on me** draws the dancer's pose in white over your webcam,
   fitted to your hips and torso length. **Speed** slows the video down for learning.
@@ -88,6 +93,7 @@ The browser will warn about the self-signed certificate once; accept it to conti
 | GET | `/api/jobs/{id}` | status, progress, message, summary |
 | GET | `/api/jobs/{id}/result` | playback data: per-frame geom poses, IK targets, 2D landmarks, errors |
 | GET | `/api/jobs/{id}/reference` | MediaPipe world/image landmarks + visibility, for `/livedemo` scoring |
+| POST | `/api/jobs/{id}/dance-similarity` | score recent webcam landmarks with `dance_similarity` (body format in `server.py`) |
 | GET | `/api/jobs/{id}/video` | the uploaded video (supports range requests) |
 | GET | `/api/jobs/{id}/files/{keypoints.npz,motion.npz}` | downloads |
 | GET | `/api/model` | the humanoid's geoms, for the live view |
