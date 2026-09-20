@@ -37,6 +37,9 @@ const DANCE_STALE_MS = 1000;
 // Webcam clips recorded here or on the main page's Live tab. They're shown mirrored, the way the
 // user saw themselves while recording, and scored unmirrored: repeat your own moves.
 const SELF_RECORDING = /^(me|webcam)-/;
+// Both stages show their video with object-fit: cover (see .stage video in livedemo.css); the
+// overlays have to be drawn the same way or they drift off a video whose aspect ratio isn't 16/9.
+const STAGE_FIT = 'cover';
 
 // Landmark index of the same point on the other side of the body, for mirroring.
 const SWAP = Array.from({ length: 33 }, (_, i) => i);
@@ -125,6 +128,12 @@ function fitGhost(refFrame, refSize, userImage, userVis, camSize) {
 
 const refVideo = $('ref-video');
 const camVideo = $('cam-video');
+
+/** The reference video's real pixel size; the server's recorded size until the video has loaded. */
+function refSize() {
+  return refVideo.videoWidth ? [refVideo.videoWidth, refVideo.videoHeight] : ref.size;
+}
+
 let ref = null; // {jobId, fps, size, self, frames: {plain, mirrored}}
 let loadToken = 0;
 
@@ -395,7 +404,7 @@ function processCameraFrame(now) {
 
   const overlay = $('cam-overlay');
   fitCanvas(overlay);
-  drawSkeleton(overlay, image, vis, camSize);
+  drawSkeleton(overlay, image, vis, camSize, { fit: STAGE_FIT });
 
   let raw = null;
   let ghost = null;
@@ -413,13 +422,13 @@ function processCameraFrame(now) {
     hint = score === null ? 'show more of your body' : 'match';
     if (score === null && Math.max(...frames[frame].vis) < MIN_VISIBILITY) hint = 'dancer not in view';
     if ($('score-method').value === 'dance') ({ raw, hint } = danceScore(user.world, now));
-    const points = $('show-ghost').checked && fitGhost(frames[frame], ref.size, image, vis, camSize);
+    const points = $('show-ghost').checked && fitGhost(frames[frame], refSize(), image, vis, camSize);
     if (points) ghost = { points, vis: frames[frame].vis };
   }
 
   const ghostCanvas = $('ghost-overlay');
   fitCanvas(ghostCanvas);
-  if (ghost) drawSkeleton(ghostCanvas, ghost.points, ghost.vis, camSize, { color: GHOST_COLOR, lineWidth: 6 });
+  if (ghost) drawSkeleton(ghostCanvas, ghost.points, ghost.vis, camSize, { color: GHOST_COLOR, lineWidth: 6, fit: STAGE_FIT });
   else clearCanvas(ghostCanvas);
 
   // Smooth toward the raw score (0 when there's nothing to score) so the meter doesn't flicker.
@@ -608,9 +617,7 @@ function render() {
   if (ref) {
     const frames = ref.frames.plain;
     const f = clamp(Math.floor(refVideo.currentTime * ref.fps), 0, frames.length - 1);
-    let size = ref.size;
-    if (refVideo.videoWidth) size = [refVideo.videoWidth, refVideo.videoHeight];
-    drawSkeleton(refOverlay, frames[f].image, frames[f].vis, size);
+    drawSkeleton(refOverlay, frames[f].image, frames[f].vis, refSize(), { fit: STAGE_FIT });
   } else {
     clearCanvas(refOverlay);
   }

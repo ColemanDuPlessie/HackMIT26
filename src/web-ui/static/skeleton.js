@@ -1,4 +1,4 @@
-// Draws MediaPipe 2D pose landmarks over a video shown with object-fit: contain.
+// Draws MediaPipe 2D pose landmarks over a video, matching how the video itself is fitted to its box.
 
 // MediaPipe pose landmark connections, and which landmarks are on the subject's left.
 const CONNECTIONS = [
@@ -35,10 +35,12 @@ export function clearCanvas(canvas) {
 
 /**
  * landmarks: 33 [x, y] in normalized image coords (null entries allowed); visibility: 33 numbers;
- * videoSize: [width, height] of the source frames. `color` draws everything in one color instead
- * of by side, and `lineWidth` scales the strokes and dots.
+ * videoSize: [width, height] of the source frames. `fit` must match the video's object-fit, or the
+ * skeleton drifts off the body whenever the video's aspect ratio differs from the canvas's. `color`
+ * draws everything in one color instead of by side, and `lineWidth` scales the strokes and dots.
  */
-export function drawSkeleton(canvas, landmarks, visibility, videoSize, { color = null, lineWidth = 3 } = {}) {
+export function drawSkeleton(canvas, landmarks, visibility, videoSize,
+    { color = null, lineWidth = 3, fit = 'contain' } = {}) {
   const ctx = canvas.getContext('2d');
   ctx.clearRect(0, 0, canvas.width, canvas.height);
   if (!landmarks) return;
@@ -47,7 +49,7 @@ export function drawSkeleton(canvas, landmarks, visibility, videoSize, { color =
   const cw = canvas.width / dpr;
   const ch = canvas.height / dpr;
   const [vw, vh] = videoSize;
-  const s = Math.min(cw / vw, ch / vh);
+  const s = fit === 'cover' ? Math.max(cw / vw, ch / vh) : Math.min(cw / vw, ch / vh);
   const ox = (cw - vw * s) / 2;
   const oy = (ch - vh * s) / 2;
   const ok = (i) => landmarks[i][0] !== null && visibility[i] >= MIN_VISIBILITY;
