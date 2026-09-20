@@ -192,6 +192,38 @@ select:focus {
   border-color: #59625b;
 }
 
+/* The offset only exists while an uploaded clip stands in for the webcam. The toolbar's labels are
+   flex, which outranks the hidden attribute, so it has to be turned off explicitly. */
+#offset-control[hidden] {
+  display: none;
+}
+
+#cam-offset {
+  width: 64px;
+  height: 36px;
+
+  padding: 0 4px 0 8px;
+
+  background: var(--surface);
+  color: var(--text);
+
+  border: 1px solid var(--line);
+  border-radius: 4px;
+
+  font: inherit;
+  font-size: 13px;
+
+  outline: none;
+}
+
+#cam-offset:hover {
+  background: var(--surface-hover);
+}
+
+#cam-offset:focus {
+  border-color: #59625b;
+}
+
 button,
 .button {
   height: 36px;

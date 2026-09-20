@@ -137,7 +137,13 @@ function refSize() {
 let ref = null; // {jobId, fps, size, self, frames: {plain, mirrored}}
 let loadToken = 0;
 
-const cam = { on: false, session: 0, stream: null, landmarker: null, lastVideoTime: -1 };
+// The "You" panel is fed either by the webcam or by an uploaded clip played in step with the
+// dancer. `url` is the object URL of that clip, kept so it can be revoked when the source changes.
+const cam = { on: false, kind: 'camera', session: 0, stream: null, url: null, landmarker: null, lastVideoTime: -1 };
+// Where the dancer's start lands in an uploaded clip: camTime = refTime + offset. A clip with a
+// few seconds of walking into frame gets a positive offset to skip it.
+const camOffset = () => Number($('cam-offset').value) || 0;
+const usingClip = () => cam.on && cam.kind === 'clip';
 let smoothed = 0;
 let lastScoreAt = null;
 let hint = 'match';
@@ -260,6 +266,9 @@ refVideo.addEventListener('ended', () => {
 });
 refVideo.addEventListener('play', updatePlayButton);
 refVideo.addEventListener('pause', updatePlayButton);
+for (const event of ['play', 'pause', 'seeked', 'ratechange', 'ended']) {
+  refVideo.addEventListener(event, () => syncClip(event === 'seeked' || event === 'play'));
+}
 
 // ---------------------------------------------------------------- playback
 
@@ -322,7 +331,22 @@ function updatePlayButton() {
 
 // ---------------------------------------------------------------- camera
 
-$('cam-btn').addEventListener('click', () => (cam.on ? stopCamera() : startCamera()));
+$('cam-btn').addEventListener('click', () => (cam.on && cam.kind === 'camera' ? stopCamera() : startCamera()));
+
+$('cam-file').addEventListener('change', async (e) => {
+  const file = e.target.files[0];
+  e.target.value = '';
+  if (!file) return;
+  if (rec.recorder || rec.counting) cancelRecording();
+  await startClip(file);
+});
+
+$('cam-offset').addEventListener('input', () => {
+  if (!usingClip()) return;
+  syncClip(true);
+  resetDance();
+  resetRun();
+});
 $('demo-model').addEventListener('change', async (e) => {
   if (!cam.on) return;
   const session = cam.session;
@@ -331,8 +355,69 @@ $('demo-model').addEventListener('change', async (e) => {
 });
 $('show-ghost').addEventListener('change', () => clearCanvas($('ghost-overlay')));
 
+/** Play an uploaded clip in the "You" panel instead of the webcam. */
+async function startClip(file) {
+  const session = ++cam.session;
+  releaseSource();
+  const btn = $('cam-btn');
+  btn.disabled = true;
+  btn.textContent = 'Loading…';
+  cam.url = URL.createObjectURL(file);
+  camVideo.srcObject = null;
+  camVideo.src = cam.url;
+  camVideo.loop = false;
+  try {
+    setStatus(`Loading ${file.name}…`);
+    await new Promise((resolve, reject) => {
+      camVideo.addEventListener('loadedmetadata', resolve, { once: true });
+      camVideo.addEventListener('error', () => reject(new Error('that video format can’t be played')), { once: true });
+    });
+    if (session !== cam.session) return;
+    setStatus('Loading pose model (first time downloads it)…');
+    cam.landmarker = await getLandmarker($('demo-model').value);
+    if (session !== cam.session) return;
+  } catch (err) {
+    if (session !== cam.session) return;
+    releaseSource();
+    btn.disabled = false;
+    btn.textContent = 'Start camera';
+    setStatus(`Could not use that video: ${err.message}`, true);
+    return;
+  }
+  cam.on = true;
+  cam.kind = 'clip';
+  // An uploaded clip isn't a selfie view, so it's shown as filmed rather than flipped.
+  $('cam-stage').classList.remove('mirrored');
+  $('cam-caption').textContent = `You · ${file.name}`;
+  $('offset-control').hidden = false;
+  btn.disabled = false;
+  updateSourceButtons();
+  resetDance();
+  syncClip(true);
+  setStatus(`Using ${file.name} as your dance. Press Play; set an offset if you start later than the dancer.`);
+  scheduleFrame(session);
+}
+
+/** Where the clip should be at dancer time `t`, kept inside the clip. */
+export function clipTime(t, offset, duration) {
+  return clamp(t + offset, 0, Math.max(0, duration - 0.001));
+}
+
+/** Hold the clip at the dancer's position, offset by the user's setting. */
+function syncClip(force = false) {
+  if (!usingClip() || !camVideo.duration) return;
+  const target = clipTime(refVideo.currentTime, camOffset(), camVideo.duration);
+  const playing = !refVideo.paused && !refVideo.ended && !counting;
+  // Seeking every frame would stall playback, so drift is only corrected once it's visible.
+  if (force || Math.abs(camVideo.currentTime - target) > (playing ? 0.25 : 0.02)) camVideo.currentTime = target;
+  if (camVideo.playbackRate !== refVideo.playbackRate) camVideo.playbackRate = refVideo.playbackRate;
+  if (playing && camVideo.paused) camVideo.play().catch(() => {});
+  if (!playing && !camVideo.paused) camVideo.pause();
+}
+
 async function startCamera() {
   const session = ++cam.session;
+  releaseSource();
   const btn = $('cam-btn');
   btn.disabled = true;
   btn.textContent = 'Starting…';
@@ -357,8 +442,12 @@ async function startCamera() {
     return;
   }
   cam.on = true;
+  cam.kind = 'camera';
+  $('cam-stage').classList.add('mirrored');
+  $('cam-caption').textContent = 'You';
+  $('offset-control').hidden = true;
   btn.disabled = false;
-  btn.textContent = 'Stop camera';
+  updateSourceButtons();
   if (ref) setStatus(`Camera on. Press Play and copy ${ref.self ? 'yourself' : 'the dancer'}.`);
   else setStatus('Camera on. Pick a video above, or record yourself.');
   scheduleFrame(session);
@@ -368,22 +457,40 @@ function stopCamera() {
   if (rec.recorder || rec.counting) cancelRecording();
   cam.session++;
   cam.on = false;
-  releaseCamera();
+  cam.kind = 'camera';
+  releaseSource();
   clearCanvas($('cam-overlay'));
   clearCanvas($('ghost-overlay'));
-  $('cam-btn').textContent = 'Start camera';
+  $('cam-stage').classList.add('mirrored');
+  $('cam-caption').textContent = 'You';
+  $('offset-control').hidden = true;
+  updateSourceButtons();
   setStatus('Camera off.');
 }
 
-function releaseCamera() {
+function releaseSource() {
   cam.stream?.getTracks().forEach((t) => t.stop());
   cam.stream = null;
   camVideo.srcObject = null;
+  camVideo.pause();
+  camVideo.removeAttribute('src');
+  camVideo.load();
+  if (cam.url) URL.revokeObjectURL(cam.url);
+  cam.url = null;
+}
+
+/** Recording needs the webcam, and only a clip has an offset to set. */
+function updateSourceButtons() {
+  $('cam-btn').textContent = cam.on && cam.kind === 'camera' ? 'Stop camera' : 'Start camera';
+  $('cam-file-label').textContent = usingClip() ? 'Use another' : 'Use video';
+  $('rec-btn').disabled = usingClip();
 }
 
 function scheduleFrame(session) {
   const next = () => { if (session === cam.session && cam.on) onCameraFrame(session); };
-  if (camVideo.requestVideoFrameCallback) camVideo.requestVideoFrameCallback(next);
+  // A clip is often paused (between runs, or while an offset is dialled in), and
+  // requestVideoFrameCallback only fires on a presented frame, so poll it instead.
+  if (camVideo.requestVideoFrameCallback && !usingClip()) camVideo.requestVideoFrameCallback(next);
   else requestAnimationFrame(next);
 }
 
@@ -414,6 +521,10 @@ function processCameraFrame(now) {
     hint = 'step into view';
   } else if (!ref) {
     hint = 'pick a video';
+  } else if (usingClip() && camVideo.duration && refVideo.currentTime + camOffset() >= camVideo.duration) {
+    hint = 'your video ended';
+  } else if (usingClip() && refVideo.currentTime + camOffset() < 0) {
+    hint = 'your video hasn’t started';
   } else {
     const frames = $('mirror-moves').checked ? ref.frames.mirrored : ref.frames.plain;
     const user = { world: world.map((p) => [p.x, p.y, p.z]), vis };
@@ -531,8 +642,9 @@ $('rec-btn').addEventListener('click', () => {
 });
 
 async function startRecording() {
+  if (usingClip()) return;
   if (!cam.on) await startCamera();
-  if (!cam.on) return;
+  if (!cam.on || !cam.stream) return;
   stopPlayback();
   const token = ++rec.token;
   rec.counting = true;
@@ -611,6 +723,8 @@ function updateRecordButton() {
 // ---------------------------------------------------------------- display loop
 
 function render() {
+  syncClip();
+
   // Dancer keypoints over the reference video (unmirrored, as the video is shown).
   const refOverlay = $('ref-overlay');
   fitCanvas(refOverlay);
