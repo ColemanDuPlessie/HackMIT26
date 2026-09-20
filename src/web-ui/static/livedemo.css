@@ -94,11 +94,15 @@ header {
 .brand-title h1 {
   margin: 0;
 
-  font-size: 34px;
-  font-weight: 600;
-  line-height: 1;
+  font-family: "League Spartan", sans-serif;
+  font-size: 38px;
+  font-weight: 900;
 
-  letter-spacing: -0.045em;
+  line-height: 0.9;
+
+  letter-spacing: -0.075em;
+
+
 }
 
 .score-readout {
@@ -334,7 +338,7 @@ input[type="checkbox"] {
 
   display: block;
 
-  object-fit: cover;
+  object-fit: contain;
 
   z-index: 1;
 }
