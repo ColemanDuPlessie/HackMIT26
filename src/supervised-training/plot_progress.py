@@ -107,10 +107,12 @@ def main():
     top.axhline(frozen, color=BASELINE_FROZEN, lw=1.5, ls=(0, (5, 3)), zorder=1)
     high, low = sorted([(frozen, "frozen pose", BASELINE_FROZEN),
                         (other, "a different dance", BASELINE_OTHER)], reverse=True)
+    # A white pad keeps the labels readable where the series crosses them.
+    pad = dict(boxstyle="square,pad=0.15", facecolor="white", edgecolor="none")
     top.annotate(f"{high[1]}  {high[0]:.2f}", (xs[0], high[0]), xytext=(2, 6),
-                 textcoords="offset points", ha="left", color=high[2], fontsize=9)
+                 textcoords="offset points", ha="left", color=high[2], fontsize=9, bbox=pad, zorder=4)
     top.annotate(f"{low[1]}  {low[0]:.2f}", (xs[0], low[0]), xytext=(2, -14),
-                 textcoords="offset points", ha="left", color=low[2], fontsize=9)
+                 textcoords="offset points", ha="left", color=low[2], fontsize=9, bbox=pad, zorder=4)
     top.plot(xs, ys, color=SERIES, lw=2, marker="o", ms=5, zorder=3)
     top.annotate(f"{ys[-1]:.2f}", (xs[-1], ys[-1]), xytext=(6, 0), textcoords="offset points",
                  va="center", color=INK, fontsize=10, fontweight="medium")
