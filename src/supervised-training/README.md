@@ -69,7 +69,8 @@ uv run generate.py some_song.mp3 --retarget danced_motion.npz
   `--lr-high-sweeps`, then linearly back to `--lr` over `--lr-decay-sweeps`, then flat. Sweeps
   are the meaningful clock when the dataset (and so the steps per sweep) changes between runs.
 - **`./run_next.sh`** runs the configuration above end to end: fresh model, 25 sweeps, song-level
-  validation, 9e-4 decaying to 3e-4, then scores and plots it.
+  validation, 200 warmup steps into 9e-4 and then the decay to 3e-4, before scoring and plotting.
+  `--warmup` ramps into the *high* rate, so it shapes only the first ~6% of the first sweep.
 - **Resuming is the default.** Re-running the same command continues from
   `checkpoints/checkpoint.pt`: same step count, same optimiser state, same LR schedule,
   same held-out validation clips, and it automatically picks up clips prepared since.
