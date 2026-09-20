@@ -1,85 +1,454 @@
-/* /livedemo: the page background is a horizontal meter that fills with the pose-match score. */
+:root {
+  --bg: #0d100e;
+  --surface: #151916;
+  --surface-hover: #1c211d;
+  --text: #eeefeb;
+  --muted: #8c958e;
+  --line: #303631;
+  --accent: #65db83;
+  --error: #df6666;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  min-height: 100%;
+  background: var(--bg);
+  color: var(--text);
+  font-family: "Helvetica Neue", Helvetica, Arial, sans-serif;
+}
+
+body {
+  padding-bottom: 24px;
+}
 
 #meter {
   position: fixed;
-  inset: 0;
-  z-index: 0;
-  background: var(--bg);
-  overflow: hidden;
+  top: 0;
+  left: 0;
+  right: 0;
+
+  height: 3px;
+
+  z-index: 20;
+
+  background: #202521;
+
+  pointer-events: none;
 }
+
 #meter-fill {
   --score: 0;
-  position: absolute;
-  inset: 0;
+
+  width: 100%;
+  height: 100%;
+
   transform-origin: left center;
   transform: scaleX(var(--score));
-  /* Red at 0 through amber to green at 1. */
-  background: linear-gradient(90deg,
-    hsl(calc(var(--score) * 130) 70% 26%),
-    hsl(calc(var(--score) * 130) 75% 40%));
+
+  background: var(--accent);
+
   transition: transform 0.12s linear;
 }
-.meter-tick {
-  position: absolute;
-  top: 0;
-  bottom: 0;
-  width: 1px;
-  background: rgba(255, 255, 255, 0.07);
+
+header {
+  border-bottom: 1px solid var(--line);
 }
 
-header, main { position: relative; z-index: 1; }
+.header-inner {
+  max-width: 1500px;
+  min-height: 78px;
 
-.demo-head { display: flex; align-items: flex-end; justify-content: space-between; gap: 16px; flex-wrap: wrap; }
-.score-readout { text-align: right; min-width: 150px; }
-.score-value {
-  font-size: 64px;
+  margin: 0 auto;
+  padding: 14px 24px;
+
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+
+  gap: 24px;
+}
+
+.brand-title {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.brand-logo {
+  width: 55px;
+  height: 55px;
+
+  flex: 0 0 55px;
+
+  background-image: url("/static/logoDanceTwo.png");
+  background-repeat: no-repeat;
+  background-position: center;
+  background-size: contain;
+}
+
+.brand-title h1 {
+  margin: 0;
+
+  font-size: 34px;
+  font-weight: 600;
   line-height: 1;
-  font-weight: 750;
+
+  letter-spacing: -0.045em;
+}
+
+.score-readout {
+  display: flex;
+  align-items: baseline;
+}
+
+.score-value {
+  color: var(--accent);
+
+  font-size: 34px;
+  font-weight: 600;
+  line-height: 1;
+
+  letter-spacing: -0.04em;
+
   font-variant-numeric: tabular-nums;
-  text-shadow: 0 2px 12px rgba(0, 0, 0, 0.5);
 }
-.score-label { color: var(--muted); font-size: 13px; }
 
-/* Let the meter show through the content. */
-.card, .panel {
-  background: rgba(23, 27, 33, 0.78);
-  backdrop-filter: blur(6px);
+.score-label {
+  display: none;
 }
-.score-detail { margin: -6px 0 12px; min-height: 1.4em; color: var(--muted); text-shadow: 0 1px 4px rgba(0, 0, 0, 0.6); }
-.status-line, .live-note { text-shadow: 0 1px 4px rgba(0, 0, 0, 0.6); }
-.live-note { color: var(--text); opacity: 0.75; }
 
-.setup-row { display: flex; flex-wrap: wrap; align-items: flex-end; gap: 14px; }
-.setup-row label:not(.button) { display: flex; flex-direction: column; gap: 4px; color: var(--muted); font-size: 13px; }
-#job-select { min-width: 260px; max-width: 100%; }
-.or { color: var(--muted); padding-bottom: 8px; }
-#demo-progress { margin-top: 14px; }
-.progress-text { margin: 8px 0 0; color: var(--muted); font-size: 13px; }
-#demo-controls label:not(.toggle) { display: flex; flex-direction: column; gap: 4px; color: var(--muted); font-size: 13px; }
+main {
+  max-width: 1500px;
 
-#cam-stage.mirrored video, #cam-stage.mirrored canvas,
-#ref-stage.mirrored video, #ref-stage.mirrored canvas { transform: scaleX(-1); }
-#rec-btn.recording { background: #3a1d22; border-color: var(--error); color: #ffc9c9; }
-#ref-overlay, #ghost-overlay, #cam-overlay { pointer-events: none; }
+  margin: 0 auto;
+  padding: 18px 24px;
+}
+
+.toolbar {
+  min-height: 58px;
+
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+
+  gap: 10px;
+
+  padding: 10px 0;
+
+  border-bottom: 1px solid var(--line);
+}
+
+.toolbar label:not(.button):not(.toggle) {
+  display: flex;
+  align-items: center;
+
+  gap: 8px;
+
+  color: var(--muted);
+
+  font-size: 12px;
+}
+
+.video-select {
+  flex: 1;
+  min-width: 300px;
+}
+
+.video-select select {
+  flex: 1;
+}
+
+select {
+  height: 36px;
+
+  padding: 0 32px 0 10px;
+
+  background: var(--surface);
+  color: var(--text);
+
+  border: 1px solid var(--line);
+  border-radius: 4px;
+
+  font: inherit;
+  font-size: 13px;
+
+  outline: none;
+}
+
+select:hover {
+  background: var(--surface-hover);
+}
+
+select:focus {
+  border-color: #59625b;
+}
+
+button,
+.button {
+  height: 36px;
+
+  padding: 0 13px;
+
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+
+  background: var(--surface);
+  color: var(--text);
+
+  border: 1px solid var(--line);
+  border-radius: 4px;
+
+  font: inherit;
+  font-size: 13px;
+  font-weight: 500;
+
+  cursor: pointer;
+
+  transition:
+    background 0.12s ease,
+    border-color 0.12s ease;
+}
+
+button:hover,
+.button:hover {
+  background: var(--surface-hover);
+  border-color: #515a53;
+}
+
+button.primary,
+#cam-btn {
+  background: var(--accent);
+  color: #071009;
+  border-color: var(--accent);
+}
+
+button.primary:hover,
+#cam-btn:hover {
+  background: #7be296;
+}
+
+button:disabled {
+  opacity: 0.35;
+  cursor: default;
+}
+
+#rec-btn.recording {
+  background: #38191b;
+  color: #ffc7c7;
+  border-color: var(--error);
+}
+
+.controls {
+  padding-top: 10px;
+  padding-bottom: 10px;
+}
+
+.toggle {
+  height: 36px;
+
+  display: flex;
+  align-items: center;
+
+  gap: 6px;
+
+  padding: 0 6px;
+
+  color: var(--muted);
+
+  font-size: 12px;
+}
+
+input[type="checkbox"] {
+  accent-color: var(--accent);
+}
+
+.hidden-status,
+#demo-status,
+#score-detail,
+.live-note {
+  display: none !important;
+}
+
+.panels {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+
+  gap: 12px;
+
+  margin-top: 14px;
+}
+
+.panel {
+  margin: 0;
+
+  overflow: hidden;
+
+  background: #080a08;
+
+  border: 1px solid var(--line);
+  border-radius: 4px;
+}
+
+.panel figcaption {
+  height: 38px;
+
+  padding: 0 12px;
+
+  display: flex;
+  align-items: center;
+
+  color: #c7cec8;
+  background: #111411;
+
+  border-bottom: 1px solid var(--line);
+
+  font-size: 12px;
+  font-weight: 500;
+}
+
+.stage {
+  position: relative;
+
+  width: 100%;
+  aspect-ratio: 16 / 9;
+
+  overflow: hidden;
+
+  background: #030403;
+}
+
+/* Video sits at the bottom */
+.stage video {
+  position: absolute;
+
+  inset: 0;
+
+  width: 100%;
+  height: 100%;
+
+  display: block;
+
+  object-fit: cover;
+
+  z-index: 1;
+}
+
+/* Skeleton canvases sit directly over the video */
+.stage canvas {
+  position: absolute;
+
+  inset: 0;
+
+  width: 100%;
+  height: 100%;
+
+  display: block;
+
+  z-index: 2;
+
+  pointer-events: none;
+}
+
+#ghost-overlay {
+  z-index: 2;
+}
+
+#ref-overlay,
+#cam-overlay {
+  z-index: 3;
+}
+
+#cam-stage.mirrored video,
+#cam-stage.mirrored canvas,
+#ref-stage.mirrored video,
+#ref-stage.mirrored canvas {
+  transform: scaleX(-1);
+}
+
+#demo-progress {
+  width: 100%;
+}
+
+.progress-track {
+  height: 2px;
+
+  background: #262c27;
+}
+
+.progress-fill {
+  height: 100%;
+
+  background: var(--accent);
+}
+
+.progress-text {
+  margin: 6px 0 0;
+
+  color: var(--muted);
+
+  font-size: 11px;
+}
 
 .countdown {
   position: absolute;
+
   inset: 0;
+
+  z-index: 10;
+
   display: grid;
   place-items: center;
-  font-size: 120px;
-  font-weight: 800;
-  color: #fff;
-  background: rgba(0, 0, 0, 0.45);
-  text-shadow: 0 4px 24px rgba(0, 0, 0, 0.6);
+
+  background: rgba(0, 0, 0, 0.55);
+
+  color: white;
+
+  font-size: 110px;
+  font-weight: 500;
 }
-/* display: grid above would otherwise override the hidden attribute. */
+
 .countdown[hidden] {
   display: none;
 }
 
-@media (max-width: 800px) {
-  .score-readout { text-align: left; }
-  .score-value { font-size: 48px; }
-  #job-select { min-width: 0; width: 100%; }
+@media (max-width: 900px) {
+  .panels {
+    grid-template-columns: 1fr;
+  }
+}
+
+@media (max-width: 600px) {
+  .header-inner {
+    padding-left: 14px;
+    padding-right: 14px;
+  }
+
+  main {
+    padding-left: 14px;
+    padding-right: 14px;
+  }
+
+  .brand-logo {
+    width: 30px;
+    height: 30px;
+    flex-basis: 30px;
+  }
+
+  .brand-title h1 {
+    font-size: 28px;
+  }
+
+  .score-value {
+    font-size: 28px;
+  }
+
+  .video-select {
+    min-width: 100%;
+  }
 }

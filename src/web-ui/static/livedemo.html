@@ -3,9 +3,11 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Pose Match Demo</title>
-  <link rel="stylesheet" href="/static/style.css">
+
+  <title>DanceRLE</title>
+
   <link rel="stylesheet" href="/static/livedemo.css">
+
   <script type="importmap">
     {
       "imports": {
@@ -16,103 +18,212 @@
     }
   </script>
 </head>
+
 <body>
-  <!-- The page background is the score meter: it fills left to right as the match improves. -->
+
   <div id="meter" aria-hidden="true">
     <div id="meter-fill"></div>
-    <div class="meter-tick" style="left: 25%"></div>
-    <div class="meter-tick" style="left: 50%"></div>
-    <div class="meter-tick" style="left: 75%"></div>
   </div>
 
   <header>
-    <div class="demo-head">
-      <div>
-        <h1>Pose match</h1>
-        <p class="sub">Pick a video, then copy the dancer on your webcam. The background fills up as your pose matches theirs.</p>
+    <div class="header-inner">
+
+      <div class="brand-title">
+        <div class="brand-logo" aria-hidden="true"></div>
+        <h1>DanceRLE</h1>
       </div>
-      <div class="score-readout" role="status" aria-live="off">
+
+      <div class="score-readout">
         <div id="score-value" class="score-value">–</div>
         <div id="score-label" class="score-label">match</div>
       </div>
+
     </div>
   </header>
 
   <main>
-    <section class="card" id="setup-card">
-      <div class="setup-row">
-        <label>Processed video
-          <select id="job-select"><option value="">Loading…</option></select>
-        </label>
-        <span class="or">or</span>
-        <label class="button" id="upload-label">
-          <input type="file" id="demo-file" accept="video/*,.mp4,.mov,.m4v,.webm,.avi,.mkv" hidden>
-          Upload a new video…
-        </label>
-        <label>Pose model
-          <select id="demo-model">
-            <option value="lite">Lite (fastest)</option>
-            <option value="full" selected>Full</option>
-            <option value="heavy">Heavy (most accurate)</option>
-          </select>
-        </label>
-      </div>
+
+    <section class="toolbar" id="setup-card">
+
+      <label class="video-select">
+        <span>Video</span>
+
+        <select id="job-select">
+          <option value="">Loading…</option>
+        </select>
+      </label>
+
+      <label class="button" id="upload-label">
+        <input
+          type="file"
+          id="demo-file"
+          accept="video/*,.mp4,.mov,.m4v,.webm,.avi,.mkv"
+          hidden
+        >
+        Upload
+      </label>
+
+      <label>
+        <span>Model</span>
+
+        <select id="demo-model">
+          <option value="lite">Lite</option>
+          <option value="full" selected>Full</option>
+          <option value="heavy">Heavy</option>
+        </select>
+      </label>
+
       <div id="demo-progress" hidden>
-        <div class="progress-track"><div class="progress-fill" id="demo-progress-fill"></div></div>
-        <p id="demo-progress-text" class="progress-text"></p>
+        <div class="progress-track">
+          <div
+            class="progress-fill"
+            id="demo-progress-fill"
+          ></div>
+        </div>
+
+        <p
+          id="demo-progress-text"
+          class="progress-text"
+        ></p>
       </div>
+
     </section>
 
-    <section class="card live-bar" id="demo-controls">
-      <button id="cam-btn" class="primary">Start camera</button>
-      <button id="rec-btn" title="Record yourself, then try to match your own recording">● Record yourself</button>
-      <button id="play-btn" disabled>▶ Play</button>
-      <button id="restart-btn" disabled>↺ Restart</button>
-      <label>Speed
+    <section
+      class="toolbar controls"
+      id="demo-controls"
+    >
+
+      <button id="cam-btn" class="primary">
+        Start camera
+      </button>
+
+      <button id="rec-btn">
+        ● Record
+      </button>
+
+      <button id="play-btn" disabled>
+        ▶ Play
+      </button>
+
+      <button id="restart-btn" disabled>
+        ↺ Restart
+      </button>
+
+      <label>
+        <span>Speed</span>
+
         <select id="demo-speed">
           <option value="0.5">0.5×</option>
           <option value="0.75">0.75×</option>
           <option value="1" selected>1×</option>
         </select>
       </label>
-      <label title="Pose match scores each webcam frame in the browser. dance_similarity runs the reward function from src/reward-calculation on the server over the last 2 s of motion.">Scoring
+
+      <label>
+        <span>Score</span>
+
         <select id="score-method">
-          <option value="pose" selected>Pose match (per frame)</option>
-          <option value="dance">dance_similarity (2 s window)</option>
+          <option value="pose" selected>Pose</option>
+          <option value="dance">Dance</option>
         </select>
       </label>
-      <label class="toggle" title="Move like a mirror image of the dancer: raise your left arm when they raise their right">
-        <input type="checkbox" id="mirror-moves" checked> Mirror the dancer
+
+      <label class="toggle">
+        <input
+          type="checkbox"
+          id="mirror-moves"
+          checked
+        >
+        Mirror
       </label>
-      <label class="toggle"><input type="checkbox" id="show-ghost" checked> Show dancer on me</label>
+
+      <label class="toggle">
+        <input
+          type="checkbox"
+          id="show-ghost"
+          checked
+        >
+        Overlay
+      </label>
+
     </section>
-    <p id="demo-status" class="status-line"></p>
-    <p id="score-detail" class="mono score-detail"></p>
+
+    <div class="hidden-status">
+      <p id="demo-status"></p>
+      <p id="score-detail"></p>
+    </div>
 
     <div class="panels">
+
       <figure class="panel">
-        <figcaption id="ref-caption">Dancer</figcaption>
-        <div class="stage" id="ref-stage">
-          <video id="ref-video" muted playsinline preload="auto"></video>
+
+        <figcaption id="ref-caption">
+          Reference
+        </figcaption>
+
+        <div
+          class="stage"
+          id="ref-stage"
+        >
+
+          <video
+            id="ref-video"
+            muted
+            playsinline
+            preload="auto"
+          ></video>
+
           <canvas id="ref-overlay"></canvas>
-          <div id="countdown" class="countdown" hidden></div>
+
+          <div
+            id="countdown"
+            class="countdown"
+            hidden
+          ></div>
+
         </div>
+
       </figure>
+
       <figure class="panel">
-        <figcaption>You <span class="hint">white: the dancer's pose, fitted to you</span></figcaption>
-        <div class="stage mirrored" id="cam-stage">
-          <video id="cam-video" muted playsinline></video>
+
+        <figcaption>
+          You
+        </figcaption>
+
+        <div
+          class="stage mirrored"
+          id="cam-stage"
+        >
+
+          <video
+            id="cam-video"
+            muted
+            playsinline
+          ></video>
+
           <canvas id="ghost-overlay"></canvas>
           <canvas id="cam-overlay"></canvas>
-          <div id="cam-countdown" class="countdown" hidden></div>
+
+          <div
+            id="cam-countdown"
+            class="countdown"
+            hidden
+          ></div>
+
         </div>
+
       </figure>
+
     </div>
-    <p class="live-note">Scoring compares the direction of your arms, legs and torso with the dancer's, allowing
-      a moment of reaction lag. Stand back so your whole body is in view.
-      <strong>Record yourself</strong> turns your own webcam clip into the dancer, so you can test how well you repeat it.</p>
+
   </main>
 
-  <script type="module" src="/static/livedemo.js"></script>
+  <script
+    type="module"
+    src="/static/livedemo.js"
+  ></script>
+
 </body>
 </html>
