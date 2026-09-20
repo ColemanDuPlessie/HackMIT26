@@ -74,7 +74,7 @@ def main():
     state = torch.load(args.out / "checkpoint.pt", map_location="cpu", weights_only=False)
     curve = state.get("curve", [])
     clips = load_clips(args.cache, state["val"])
-    snapshots = sorted((args.out / "snapshots").glob("sweep*.pt"))
+    snapshots = sorted((args.out / "snapshots").glob("step*.pt"))
     if not snapshots:
         raise SystemExit(f"No snapshots in {args.out / 'snapshots'}; train with --snapshot-every N.")
 
@@ -83,19 +83,16 @@ def main():
     if cache_path.exists() and not args.rescore:
         cached = json.loads(cache_path.read_text())
 
-    by_sweep = {point["sweep"]: point for point in curve}
     xs, ys = [], []
     for path in snapshots:
-        sweep = int(path.stem.replace("sweep", ""))
-        point = by_sweep.get(sweep)
+        step = int(path.stem.replace("step", ""))
         value = cached.get(path.name)
         if value is None:
             value = score_snapshot(path, clips, args.device, args.seed_frames)
             cached[path.name] = value
-        xs.append(point["minutes"] if point else len(xs))
+        xs.append(step)
         ys.append(value)
-        print(f"{path.name}: sweep {sweep}, step {point['step'] if point else '?'}, "
-              f"dance_similarity {value:.3f}")
+        print(f"{path.name}: step {step}, dance_similarity {value:.3f}")
     if "baselines" not in cached:
         cached["baselines"] = list(baselines(clips))
     frozen, other = cached["baselines"]
@@ -122,10 +119,10 @@ def main():
     top.set_ylim(0, max(0.45, max(ys + [frozen, other]) * 1.25))
 
     if curve:
-        bottom.plot([p["minutes"] for p in curve], [p["val_loss"] for p in curve],
+        bottom.plot([p["step"] for p in curve], [p["val_loss"] for p in curve],
                     color=SERIES, lw=2, zorder=3)
     bottom.set_ylabel("validation loss", color=MUTED, fontsize=10)
-    bottom.set_xlabel("minutes of training", color=MUTED, fontsize=10)
+    bottom.set_xlabel("training steps", color=MUTED, fontsize=10)
     bottom.set_title("Validation loss per sweep", color=INK, fontsize=11, loc="left", pad=8)
 
     for ax in (top, bottom):
@@ -137,6 +134,18 @@ def main():
         for side in ("left", "bottom"):
             ax.spines[side].set_color(GRID)
         ax.tick_params(colors=MUTED, labelsize=9, length=0)
+
+    resumed_at = []
+    seen = 0
+    for entry in state.get("history", [])[:-1]:
+        seen += entry["steps"]
+        resumed_at.append(seen)
+    for step in resumed_at:
+        for ax in (top, bottom):
+            ax.axvline(step, color=GRID, lw=1.5, zorder=0)
+    if resumed_at:
+        top.annotate("resumed on new clips", (resumed_at[-1], top.get_ylim()[1]), xytext=(4, -12),
+                     textcoords="offset points", ha="left", va="top", color=MUTED, fontsize=9)
 
     passes = sum(state["uses"].values())
     fig.text(0.125, 0.955, f"{len(state['uses'])} clips, {passes} passes, {state['step']} steps, "

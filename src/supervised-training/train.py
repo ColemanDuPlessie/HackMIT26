@@ -294,7 +294,7 @@ def main():
       if args.snapshot_every and sweep % args.snapshot_every == 0:
           snap_dir = args.out / "snapshots"
           snap_dir.mkdir(exist_ok=True)
-          save(snap_dir / f"sweep{sweep:04d}.pt", slim(state, model, stats, fps, state["val"]))
+          save(snap_dir / f"step{state['step']:06d}.pt", slim(state, model, stats, fps, state["val"]))
       queue = next_queue()  # clips that have hit the cap drop out; the rest come round again
 
     # ---------------------------------------------------------------- finish
