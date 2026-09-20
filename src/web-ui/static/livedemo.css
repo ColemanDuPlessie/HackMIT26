@@ -334,7 +334,7 @@ input[type="checkbox"] {
 
   display: block;
 
-  object-fit: cover;
+  object-fit: contain;
 
   z-index: 1;
 }

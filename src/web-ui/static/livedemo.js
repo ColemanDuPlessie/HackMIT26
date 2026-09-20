@@ -37,9 +37,9 @@ const DANCE_STALE_MS = 1000;
 // Webcam clips recorded here or on the main page's Live tab. They're shown mirrored, the way the
 // user saw themselves while recording, and scored unmirrored: repeat your own moves.
 const SELF_RECORDING = /^(me|webcam)-/;
-// Both stages show their video with object-fit: cover (see .stage video in livedemo.css); the
+// Both stages letterbox their video (object-fit: contain, see .stage video in livedemo.css); the
 // overlays have to be drawn the same way or they drift off a video whose aspect ratio isn't 16/9.
-const STAGE_FIT = 'cover';
+const STAGE_FIT = 'contain';
 
 // Landmark index of the same point on the other side of the body, for mirroring.
 const SWAP = Array.from({ length: 33 }, (_, i) => i);
