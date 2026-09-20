@@ -14,23 +14,25 @@ is underway rather than an intro.
 
 ## Read these numbers carefully
 
-They look far worse than the 0.40 the model averages on its held-out set, and the reason is
-instructive: **most of that set is barely moving.** These middles average 3.66 and 2.05 cm of
-joint movement per frame; the `sBM` opening chunks the score is usually computed on average
-**0.36 cm/frame** — ten times stiller, often a dancer standing and waiting for the music. On a
-near-static clip a frozen pose scores 0.45 by itself, and beating it is easy.
+They look far worse than the 0.40 the model averages on its held-out set, and the difference is
+not mainly about movement. Measured across the ten clips the model is scored on, movement
+averages **1.98 cm/frame**, against 3.66 and 2.05 here — so these middles are at or only modestly
+above the usual level. What actually separates them:
 
-On genuinely active dancing the picture is sober: the model beats a frozen pose by half on the
-held-out clip (0.160 vs 0.111) and merely *ties* it on a clip it trained on 25 times
-(0.150 vs 0.153). It is well clear of an unrelated dance in both cases (0.064, 0.065), so it is
-not producing noise — it is producing plausible but wrong choreography.
+1. **They are `sFM` ("advanced") recordings, and training was ~97% `sBM` ("basic").** These are
+   out of distribution for the model.
+2. **They are 16 s rather than ~10 s.** The model predicts each pose from the previous one, so
+   error compounds; a longer clip is a harder rollout.
 
-Two consequences worth acting on:
+What the per-clip numbers do show is that `dance_similarity` is strongly conditioned on the clip
+itself: a clip's own frozen-pose baseline ranges from 0.16 to 0.50 across the scored set, and the
+model's score tracks it. The honest summary of the model on its held-out set is therefore not
+0.404 but **+0.033 mean margin over each clip's own frozen pose** — it beats standing still on 7
+of 10 clips and loses on 3.
 
-1. The headline 0.404 is inflated by low-motion clips. A movement-weighted metric, or simply
-   reporting motion alongside score, would stop that.
-2. These are `sFM` ("advanced") recordings while training was ~97% `sBM` ("basic"), so they are
-   also out of distribution. The two effects are tangled here and worth separating.
+On these two middles the margin is +0.049 (held out) and -0.003 (trained). It is well clear of an
+unrelated dance in both cases (0.064, 0.065), so it is not producing noise — it is producing
+plausible but wrong choreography.
 
 ## What's in each folder
 
