@@ -3,3 +3,6 @@ __pycache__/
 cache/
 checkpoints/
 *.npz
+archive/
+checkpoints-*/
+progress*.png
