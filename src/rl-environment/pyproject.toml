@@ -1,0 +1,23 @@
+[project]
+name = "rl-environment"
+version = "0.1.0"
+description = "Music -> dance as an MDP: PPO fine-tuning of the supervised model on a non-differentiable reward"
+requires-python = ">=3.10,<3.13"
+dependencies = [
+    "pose-estimation",
+    "numpy",
+    "torch",
+    "librosa",
+    "soundfile",
+]
+
+[project.optional-dependencies]
+# The env implements gymnasium's API but does not need it (see the shim in env.py). Install
+# this to register it with an off-the-shelf learner such as SB3 or CleanRL.
+gym = ["gymnasium>=0.29"]
+
+[tool.uv]
+package = false
+
+[tool.uv.sources]
+pose-estimation = { path = "../pose-estimation", editable = true }
