@@ -11,6 +11,7 @@ Usage:
 """
 
 import argparse
+import json
 from pathlib import Path
 
 import matplotlib
@@ -65,6 +66,8 @@ def main():
     parser.add_argument("--cache", type=Path, default=ROOT / "cache")
     parser.add_argument("--png", type=Path, default=ROOT / "progress.png")
     parser.add_argument("--seed-frames", type=int, default=30)
+    parser.add_argument("--rescore", action="store_true",
+                        help="ignore cached scores and generate every snapshot's dances again")
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     args = parser.parse_args()
 
@@ -75,17 +78,28 @@ def main():
     if not snapshots:
         raise SystemExit(f"No snapshots in {args.out / 'snapshots'}; train with --snapshot-every N.")
 
+    cache_path = args.out / "snapshot_scores.json"
+    cached = {}
+    if cache_path.exists() and not args.rescore:
+        cached = json.loads(cache_path.read_text())
+
     by_sweep = {point["sweep"]: point for point in curve}
     xs, ys = [], []
     for path in snapshots:
         sweep = int(path.stem.replace("sweep", ""))
         point = by_sweep.get(sweep)
-        value = score_snapshot(path, clips, args.device, args.seed_frames)
+        value = cached.get(path.name)
+        if value is None:
+            value = score_snapshot(path, clips, args.device, args.seed_frames)
+            cached[path.name] = value
         xs.append(point["minutes"] if point else len(xs))
         ys.append(value)
         print(f"{path.name}: sweep {sweep}, step {point['step'] if point else '?'}, "
               f"dance_similarity {value:.3f}")
-    frozen, other = baselines(clips)
+    if "baselines" not in cached:
+        cached["baselines"] = list(baselines(clips))
+    frozen, other = cached["baselines"]
+    cache_path.write_text(json.dumps(cached, indent=1))
     print(f"baselines: frozen pose {frozen:.3f}, a different dance {other:.3f}")
 
     fig, (top, bottom) = plt.subplots(2, 1, figsize=(8, 6.5), sharex=True,
@@ -94,10 +108,12 @@ def main():
 
     top.axhline(other, color=BASELINE_OTHER, lw=1.5, ls=(0, (5, 3)), zorder=1)
     top.axhline(frozen, color=BASELINE_FROZEN, lw=1.5, ls=(0, (5, 3)), zorder=1)
-    top.annotate(f"a different dance  {other:.2f}", (xs[-1], other), xytext=(-4, 5),
-                 textcoords="offset points", ha="right", color=BASELINE_OTHER, fontsize=9)
-    top.annotate(f"frozen pose  {frozen:.2f}", (xs[-1], frozen), xytext=(-4, -13),
-                 textcoords="offset points", ha="right", color=BASELINE_FROZEN, fontsize=9)
+    high, low = sorted([(frozen, "frozen pose", BASELINE_FROZEN),
+                        (other, "a different dance", BASELINE_OTHER)], reverse=True)
+    top.annotate(f"{high[1]}  {high[0]:.2f}", (xs[0], high[0]), xytext=(2, 6),
+                 textcoords="offset points", ha="left", color=high[2], fontsize=9)
+    top.annotate(f"{low[1]}  {low[0]:.2f}", (xs[0], low[0]), xytext=(2, -14),
+                 textcoords="offset points", ha="left", color=low[2], fontsize=9)
     top.plot(xs, ys, color=SERIES, lw=2, marker="o", ms=5, zorder=3)
     top.annotate(f"{ys[-1]:.2f}", (xs[-1], ys[-1]), xytext=(6, 0), textcoords="offset points",
                  va="center", color=INK, fontsize=10, fontweight="medium")
