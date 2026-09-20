@@ -68,6 +68,9 @@ uv run generate.py some_song.mp3 --retarget danced_motion.npz
   warming up -- and `--warmup` / `--total-steps` override them.
 - **Outputs:** `checkpoint.pt` (resumable, includes optimiser + ledger), `model.pt` (the final
   weights, what `generate.py` and `evaluate.py` read) and `best.pt` (best validation loss).
+  `--snapshot-every N` also keeps `snapshots/sweepNNNN.pt` every N sweeps, and every sweep
+  appends a point to the checkpoint's `curve`. `plot_progress.py` scores those snapshots with
+  `dance_similarity` and draws the run's progress.
 
 Training stops early once every prepared clip has hit the cap. That's the normal outcome
 here, not an error: prepare more clips, or raise `--max-uses`.

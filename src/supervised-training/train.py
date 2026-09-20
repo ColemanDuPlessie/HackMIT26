@@ -140,6 +140,8 @@ def main():
     parser.add_argument("--w-vel", type=float, default=1.0, dest="w_vel")
     parser.add_argument("--w-acc", type=float, default=0.5, dest="w_acc")
     parser.add_argument("--clip-grad", type=float, default=1.0)
+    parser.add_argument("--snapshot-every", type=int, default=0,
+                        help="keep a numbered copy of the weights every N sweeps, for plotting progress")
     parser.add_argument("--val-clips", type=int, default=3, help="clips held out permanently (first run only)")
     parser.add_argument("--max-uses", type=int, default=5,
                         help="how often one clip may ever be trained on, across all runs")
@@ -187,7 +189,7 @@ def main():
         state = {"config": {k: getattr(args, k) for k in FROZEN} | {"model": model_config(args).to_dict(),
                                                                    "stride": args.stride},
                  "stats": stats.to_dict(), "uses": {}, "val": val_names,
-                 "step": 0, "best_val": float("inf"), "history": []}
+                 "step": 0, "best_val": float("inf"), "history": [], "curve": []}
         print(f"Fresh run. Held out {len(val_names)} clips for validation: {', '.join(val_names)}")
 
     model = MotionTransformer(ModelConfig(**state["config"]["model"])).to(device)
@@ -278,6 +280,10 @@ def main():
         print(f"sweep {sweep}  step {state['step']:6d}  passes {sum(uses.values()):5d}  "
               f"train {run['loss']:.4f}  val {val['loss']:.4f}  {left:.0f} min left")
 
+        # One point per sweep, so progress can be plotted without re-running anything.
+        state.setdefault("curve", []).append(
+            {"sweep": sweep, "step": state["step"], "minutes": round((time.time() - run["started"]) / 60, 2),
+             "train_loss": run["loss"], "val_loss": val["loss"], "passes": sum(uses.values())})
         state["model_state"] = model.state_dict()
         state["optimiser"] = optimiser.state_dict()
         save(ckpt_path, state)
@@ -285,6 +291,10 @@ def main():
         if val["loss"] < state["best_val"]:
             state["best_val"] = val["loss"]
             save(args.out / "best.pt", slim(state, model, stats, fps, state["val"]))
+      if args.snapshot_every and sweep % args.snapshot_every == 0:
+          snap_dir = args.out / "snapshots"
+          snap_dir.mkdir(exist_ok=True)
+          save(snap_dir / f"sweep{sweep:04d}.pt", slim(state, model, stats, fps, state["val"]))
       queue = next_queue()  # clips that have hit the cap drop out; the rest come round again
 
     # ---------------------------------------------------------------- finish
