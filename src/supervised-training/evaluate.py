@@ -13,6 +13,11 @@ the dancer actually did. Two caveats worth keeping in mind while reading the num
   * --baselines prints reference points: the real dance against itself (the ceiling, 1.0),
     against a frozen pose, and against a different clip's dance. A model that can't beat
     "mean pose held still" has learnt nothing, and that is a surprisingly common outcome.
+  * Clips differ enormously in how much dancing they contain - an opening chunk where the
+    dancer waits for the music moves a tenth as much as a mid-song chunk - and a frozen pose
+    scores well on the still ones. So alongside the plain mean this reports a mean weighted by
+    each clip's motion, and the mean margin over each clip's own frozen-pose baseline. Those
+    two are the numbers to quote; the plain mean flatters a model that barely moves.
 """
 
 import argparse
@@ -48,6 +53,21 @@ def beat_alignment(world: np.ndarray, audio: np.ndarray, fps: float, tolerance_s
 def score(reference: np.ndarray, generated: np.ndarray, fps: float) -> dict:
     n = min(len(reference), len(generated))  # dance_similarity needs matching shapes
     return trajectory_similarity.dance_similarity(reference[:n], generated[:n], fps)
+
+
+def frozen_baseline(reference: np.ndarray, fps: float) -> float:
+    """What this clip scores against its own first pose, held for the whole clip."""
+    return float(score(reference, np.repeat(reference[:1], len(reference), axis=0), fps)["final_score"])
+
+
+def weighted_means(rows: list[dict]) -> dict:
+    """Plain mean, motion-weighted mean, and mean margin over each clip's frozen pose."""
+    motion = np.array([r["motion"] for r in rows])
+    scores = np.array([r["score"] for r in rows])
+    margins = scores - np.array([r["frozen"] for r in rows])
+    weights = motion / motion.sum() if motion.sum() > 0 else np.full(len(rows), 1 / len(rows))
+    return {"mean": float(scores.mean()), "weighted": float((scores * weights).sum()),
+            "margin": float(margins.mean()), "motion_cm": float(motion.mean() * 100)}
 
 
 def main():
@@ -92,23 +112,31 @@ def main():
         reference = features.unflatten_motion(clip["motion"])
 
         result = score(reference, generated, fps)
-        rows.append((clip["name"], result["final_score"],
-                     beat_alignment(generated, clip["audio"], fps),
-                     beat_alignment(reference, clip["audio"], fps)))
+        rows.append({"name": clip["name"], "score": float(result["final_score"]),
+                     "motion": features.motion_amount(reference),
+                     "frozen": frozen_baseline(reference, fps),
+                     "beat": beat_alignment(generated, clip["audio"], fps),
+                     "beat_real": beat_alignment(reference, clip["audio"], fps)})
         print(f"{clip['name']:40s} score {result['final_score']:.3f}  "
               f"(position {result['position_score']:.2f} angle {result['angle_score']:.2f} "
               f"trajectory {result['trajectory_score']:.2f} timing {result['timing_score']:.2f})  "
-              f"beat {rows[-1][2]:.2f} vs real {rows[-1][3]:.2f}")
+              f"motion {rows[-1]['motion'] * 100:.2f} cm/frame  frozen {rows[-1]['frozen']:.2f}  "
+              f"beat {rows[-1]['beat']:.2f} vs real {rows[-1]['beat_real']:.2f}")
 
-    scores = np.array([r[1] for r in rows])
     by_genre: dict[str, list[float]] = {}
-    for name, value, *_ in rows:
-        by_genre.setdefault(name.split("_")[0], []).append(value)
+    for row in rows:
+        by_genre.setdefault(row["name"].split("_")[0], []).append(row["score"])
     if len(by_genre) > 1:
         print("\nby genre: " + "  ".join(f"{g} {np.mean(v):.3f}" for g, v in sorted(by_genre.items())))
-    print(f"\nmean dance_similarity {scores.mean():.3f} over {len(rows)} clips")
-    print(f"mean beat alignment   {np.nanmean([r[2] for r in rows]):.3f} "
-          f"(real dances {np.nanmean([r[3] for r in rows]):.3f})")
+
+    agg = weighted_means(rows)
+    print(f"\nmean dance_similarity      {agg['mean']:.3f} over {len(rows)} clips")
+    print(f"motion-weighted mean       {agg['weighted']:.3f}  "
+          f"(clips average {agg['motion_cm']:.2f} cm/frame of movement)")
+    print(f"mean margin over frozen    {agg['margin']:+.3f}  "
+          f"(per clip, against its own frozen pose)")
+    print(f"mean beat alignment        {np.nanmean([r['beat'] for r in rows]):.3f} "
+          f"(real dances {np.nanmean([r['beat_real'] for r in rows]):.3f})")
 
     if args.baselines:
         clip = clips[0]

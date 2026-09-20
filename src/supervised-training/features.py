@@ -110,6 +110,17 @@ def to_keypoints(world: np.ndarray, fps: float) -> dict:
     }
 
 
+def motion_amount(world: np.ndarray) -> float:
+    """Mean joint movement per frame, in metres: how much dancing is actually happening.
+
+    A clip where the dancer waits for the music scores well against a frozen pose, so an
+    unweighted mean over clips rewards standing still. This is the weight that fixes that.
+    """
+    if len(world) < 2:
+        return 0.0
+    return float(np.linalg.norm(np.diff(world, axis=0), axis=2).mean())
+
+
 def kinematic_beats(world: np.ndarray, fps: float) -> np.ndarray:
     """Frame indices where motion 'hits': local minima of overall joint speed.
 
