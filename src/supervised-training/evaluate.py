@@ -23,7 +23,7 @@ import numpy as np
 import torch
 
 import features
-from dataset import load_clips
+from dataset import load_clips, sample_across_genres
 from generate import load_checkpoint
 
 ROOT = Path(__file__).resolve().parent
@@ -57,6 +57,8 @@ def main():
     parser.add_argument("--clips", type=Path, nargs="*", help="specific prepared .npz files")
     parser.add_argument("--seed-frames", type=int, default=30)
     parser.add_argument("--baselines", action="store_true")
+    parser.add_argument("--limit", type=int, default=10,
+                        help="held-out clips to score, sampled across genres (0 = all)")
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     args = parser.parse_args()
 
@@ -73,6 +75,10 @@ def main():
         clips = [c for c in clips if c["name"] in held_out]
     if not clips:
         sys.exit("No clips to evaluate.")
+    chosen = set(sample_across_genres([c["name"] for c in clips], args.limit))
+    clips = [c for c in clips if c["name"] in chosen]
+    print(f"Scoring {len(clips)} of {len(held_out)} held-out clips "
+          f"({len({c['name'].split('_')[0] for c in clips})} genres)\n")
 
     rows = []
     for clip in clips:
@@ -95,6 +101,11 @@ def main():
               f"beat {rows[-1][2]:.2f} vs real {rows[-1][3]:.2f}")
 
     scores = np.array([r[1] for r in rows])
+    by_genre: dict[str, list[float]] = {}
+    for name, value, *_ in rows:
+        by_genre.setdefault(name.split("_")[0], []).append(value)
+    if len(by_genre) > 1:
+        print("\nby genre: " + "  ".join(f"{g} {np.mean(v):.3f}" for g, v in sorted(by_genre.items())))
     print(f"\nmean dance_similarity {scores.mean():.3f} over {len(rows)} clips")
     print(f"mean beat alignment   {np.nanmean([r[2] for r in rows]):.3f} "
           f"(real dances {np.nanmean([r[3] for r in rows]):.3f})")

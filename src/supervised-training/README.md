@@ -58,7 +58,18 @@ uv run generate.py some_song.mp3 --retarget danced_motion.npz
 - **`--max-uses`** (5) caps how often a clip may *ever* be trained on, across all runs. The
   checkpoint counts each clip's passes. Within a run the data is swept repeatedly, least-used
   clips first, until either the time budget runs out or every clip has hit the cap, so the
-  dataset is consumed evenly and nothing is over-trained.
+  dataset is consumed evenly and nothing is over-trained. One sweep = one use, so `--max-uses 25`
+  is also "stop after 25 sweeps".
+- **Validation is held out by song, across genres** (`--val-songs 1`): one song per genre, with
+  all of its clips. Clips of one song share a soundtrack, so a per-clip split leaks the music
+  into training; a split within one genre (the earlier default) leaves the metric blind to the
+  rest of the distribution, which is exactly how a run that trained on seven new genres came
+  out looking like a regression.
+- **The learning rate follows sweeps, not steps:** `--lr-high-mult` x `--lr` for the first
+  `--lr-high-sweeps`, then linearly back to `--lr` over `--lr-decay-sweeps`, then flat. Sweeps
+  are the meaningful clock when the dataset (and so the steps per sweep) changes between runs.
+- **`./run_next.sh`** runs the configuration above end to end: fresh model, 25 sweeps, song-level
+  validation, 9e-4 decaying to 3e-4, then scores and plots it.
 - **Resuming is the default.** Re-running the same command continues from
   `checkpoints/checkpoint.pt`: same step count, same optimiser state, same LR schedule,
   same held-out validation clips, and it automatically picks up clips prepared since.

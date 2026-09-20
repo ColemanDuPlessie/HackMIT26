@@ -67,6 +67,27 @@ def load_clips(cache_dir: Path, names: list[str] | None = None) -> list[dict]:
     return clips
 
 
+def sample_across_genres(names: list[str], limit: int) -> list[str]:
+    """Up to `limit` clip names, spread evenly over genres and deterministic.
+
+    Generating a dance per clip costs about half a minute, so scoring every held-out clip of
+    every snapshot is out of the question; this keeps the sample balanced instead of taking
+    whichever genre sorts first.
+    """
+    if limit <= 0 or len(names) <= limit:
+        return list(names)
+    by_genre: dict[str, list[str]] = {}
+    for name in sorted(names):
+        by_genre.setdefault(name.split("_")[0], []).append(name)
+    picked, genres = [], sorted(by_genre)
+    while len(picked) < limit:
+        for genre in genres:
+            if by_genre[genre] and len(picked) < limit:
+                # Step through each genre's clips so the sample spans songs too.
+                picked.append(by_genre[genre].pop(len(by_genre[genre]) // 2))
+    return sorted(picked)
+
+
 def split_clips(clips: list[dict], holdout: float = 0.15, seed: int = 0) -> tuple[list[dict], list[dict]]:
     """Split by clip, not by window, so windows of one dance never straddle the split.
 

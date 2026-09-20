@@ -22,7 +22,7 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402
 
 import features  # noqa: E402
-from dataset import load_clips  # noqa: E402
+from dataset import load_clips, sample_across_genres  # noqa: E402
 from evaluate import score  # noqa: E402
 from generate import load_checkpoint  # noqa: E402
 
@@ -66,6 +66,8 @@ def main():
     parser.add_argument("--cache", type=Path, default=ROOT / "cache")
     parser.add_argument("--png", type=Path, default=ROOT / "progress.png")
     parser.add_argument("--seed-frames", type=int, default=30)
+    parser.add_argument("--limit", type=int, default=10,
+                        help="held-out clips scored per snapshot, sampled across genres (0 = all)")
     parser.add_argument("--rescore", action="store_true",
                         help="ignore cached scores and generate every snapshot's dances again")
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
@@ -73,7 +75,9 @@ def main():
 
     state = torch.load(args.out / "checkpoint.pt", map_location="cpu", weights_only=False)
     curve = state.get("curve", [])
-    clips = load_clips(args.cache, state["val"])
+    clips = load_clips(args.cache, sample_across_genres(state["val"], args.limit))
+    print(f"scoring {len(clips)} held-out clips per snapshot "
+          f"({len({c['name'].split('_')[0] for c in clips})} genres)")
     snapshots = sorted((args.out / "snapshots").glob("step*.pt"))
     if not snapshots:
         raise SystemExit(f"No snapshots in {args.out / 'snapshots'}; train with --snapshot-every N.")

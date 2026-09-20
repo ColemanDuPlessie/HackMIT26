@@ -1,6 +1,6 @@
 """Train the music -> motion model with a capped number of passes per clip, resumably.
 
-No clip is trained on more than --max-uses times, ever (5 by default). The checkpoint carries
+No clip is trained on more than --max-uses times, ever (5 by default; one sweep = one use). The checkpoint carries
 a ledger counting how often each clip has been used, so a later run continues where the last
 one stopped: least-used clips first, including clips prepared after the last run finished.
 The cap is what keeps a small dataset from being memorised by a comparatively large model.
@@ -23,7 +23,8 @@ Outputs in --out:
 
 import argparse
 import json
-import math
+import random
+import re
 import signal
 import time
 from pathlib import Path
@@ -37,7 +38,7 @@ from model import ModelConfig, MotionTransformer
 
 ROOT = Path(__file__).resolve().parent
 # Config that must not change between runs: the ledger and optimiser state assume them.
-FROZEN = ("window", "batch", "lr")
+FROZEN = ("window", "batch", "lr", "lr_high_mult", "lr_high_sweeps", "lr_decay_sweeps")
 
 
 def model_config(args) -> ModelConfig:
@@ -59,16 +60,45 @@ def motion_loss(pred: torch.Tensor, target: torch.Tensor, w_vel: float, w_acc: f
     return {"loss": pos + w_vel * vel + w_acc * acc, "pos": pos, "vel": vel, "acc": acc}
 
 
-def lr_at(step: int, base: float, warmup: int, total: int, floor: float = 0.1) -> float:
-    """Linear warmup then cosine decay to `floor * base`, computed from the step alone.
+def lr_at(sweep_pos: float, base: float, high_mult: float, high_sweeps: float,
+          decay_sweeps: float) -> float:
+    """Learning rate at a fractional sweep position (1.5 = halfway through the second sweep).
 
-    Deriving it from the step rather than a scheduler object means resuming needs nothing
-    but the step count, and the shape survives a run that stops early.
+    `high_mult` x base while the model is still seeing each clip for the first few times,
+    then a linear decay to base over the next `decay_sweeps`, then base. Tying the shape to
+    sweeps rather than steps keeps it meaningful when the dataset (and so the steps per
+    sweep) changes between runs.
     """
-    if step < warmup:
-        return base * (step + 1) / warmup
-    progress = min(1.0, (step - warmup) / max(1, total - warmup))
-    return base * (floor + (1 - floor) * 0.5 * (1 + math.cos(math.pi * progress)))
+    if sweep_pos < high_sweeps:
+        return base * high_mult
+    if sweep_pos < high_sweeps + decay_sweeps:
+        t = (sweep_pos - high_sweeps) / decay_sweeps
+        return base * (high_mult + (1.0 - high_mult) * t)
+    return base
+
+
+def choose_val_clips(names: list[str], songs_per_genre: int, seed: int) -> list[str]:
+    """Hold out whole songs, spread across every genre.
+
+    Clips of one song share a soundtrack, so splitting by clip leaks the music into training;
+    splitting by genre alone leaves the metric blind to most of the distribution. AIST names
+    look like gBR_sBM_c01_d04_mBR0_ch01_00 -> genre gBR, song mBR0. Names that don't parse
+    fall back to taking the first few clips.
+    """
+    songs: dict[tuple[str, str], list[str]] = {}
+    for name in names:
+        parts = name.split("_")
+        if len(parts) >= 5 and re.fullmatch(r"g[A-Z]{2}", parts[0]) and re.fullmatch(r"m\w+", parts[4]):
+            songs.setdefault((parts[0], parts[4]), []).append(name)
+    if not songs:
+        return names[: max(1, songs_per_genre)]
+    rng = random.Random(seed)
+    val: list[str] = []
+    for genre in sorted({g for g, _ in songs}):
+        choices = sorted(song for g, song in songs if g == genre)
+        for song in rng.sample(choices, min(songs_per_genre, len(choices))):
+            val += songs[(genre, song)]
+    return sorted(val)
 
 
 def fit_stats(cache: Path) -> Stats:
@@ -131,18 +161,24 @@ def main():
     parser.add_argument("--stride", type=int, default=0,
                         help="window start spacing; 0 = no overlap, so each frame is trained on once")
     parser.add_argument("--batch", type=int, default=16)
-    parser.add_argument("--lr", type=float, default=3e-4)
-    parser.add_argument("--warmup", type=int,
-                        help="LR warmup steps; default is 5%% of this run's planned steps")
-    parser.add_argument("--total-steps", type=int,
-                        help="horizon the cosine decay is shaped for; default is this run's planned steps")
+    parser.add_argument("--lr", type=float, default=3e-4, help="the rate the schedule decays to")
+    parser.add_argument("--lr-high-mult", type=float, default=3.0, dest="lr_high_mult",
+                        help="multiple of --lr used for the first sweeps")
+    parser.add_argument("--lr-high-sweeps", type=float, default=5.0, dest="lr_high_sweeps",
+                        help="sweeps held at the high rate")
+    parser.add_argument("--lr-decay-sweeps", type=float, default=15.0, dest="lr_decay_sweeps",
+                        help="sweeps over which it decays linearly back to --lr")
+    parser.add_argument("--warmup", type=int, default=0,
+                        help="steps ramping into the high rate at the very start (0 = none)")
     parser.add_argument("--noise", type=float, default=0.02, help="input pose noise, in normalised units")
     parser.add_argument("--w-vel", type=float, default=1.0, dest="w_vel")
     parser.add_argument("--w-acc", type=float, default=0.5, dest="w_acc")
     parser.add_argument("--clip-grad", type=float, default=1.0)
     parser.add_argument("--snapshot-every", type=int, default=0,
                         help="keep a numbered copy of the weights every N sweeps, for plotting progress")
-    parser.add_argument("--val-clips", type=int, default=3, help="clips held out permanently (first run only)")
+    parser.add_argument("--val-songs", type=int, default=1, dest="val_songs",
+                        help="songs held out per genre, with all their clips (first run only)")
+    parser.add_argument("--val-seed", type=int, default=0, help="which songs --val-songs picks")
     parser.add_argument("--max-uses", type=int, default=5,
                         help="how often one clip may ever be trained on, across all runs")
     parser.add_argument("--d-model", type=int, default=ModelConfig.d_model, dest="d_model")
@@ -184,13 +220,15 @@ def main():
               f"{sum(used.values())} passes so far (cap {args.max_uses} each)")
     else:
         stats = fit_stats(args.cache)
-        # Held out by name, recorded in the checkpoint, and never trained on in any run.
-        val_names = clips_available[: args.val_clips]
+        # Held out by whole song, recorded in the checkpoint, never trained on in any run.
+        val_names = choose_val_clips(clips_available, args.val_songs, args.val_seed)
         state = {"config": {k: getattr(args, k) for k in FROZEN} | {"model": model_config(args).to_dict(),
                                                                    "stride": args.stride},
                  "stats": stats.to_dict(), "uses": {}, "val": val_names,
                  "step": 0, "best_val": float("inf"), "history": [], "curve": []}
-        print(f"Fresh run. Held out {len(val_names)} clips for validation: {', '.join(val_names)}")
+        held_songs = sorted({"_".join(n.split("_")[:1] + n.split("_")[4:5]) for n in val_names})
+        print(f"Fresh run. Held out {len(val_names)} clips from {len(held_songs)} songs: "
+              f"{', '.join(held_songs)}")
 
     model = MotionTransformer(ModelConfig(**state["config"]["model"])).to(device)
     optimiser = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=0.01)
@@ -219,18 +257,13 @@ def main():
     print(f"{len(clips_available)} prepared, {len(queue)} below the cap ({budget} passes left) "
           f"-> this run's budget: {args.minutes:.0f} min on {device}")
 
-    # A short run must not spend all of itself warming up, so scale the schedule to the work
-    # actually queued: passes left x windows per clip / batch. Clip lengths vary a little, so
-    # the validation clips stand in for the rest.
     frames = int(np.median([len(c["motion"]) for c in val_clips]))
     windows_per_clip = max(1, (frames - args.window) // args.stride + 1)
     planned = max(1, budget * windows_per_clip // args.batch)
-    if args.warmup is None:
-        args.warmup = int(np.clip(round(0.05 * planned), 10, 500))
-    if args.total_steps is None:
-        args.total_steps = state["step"] + planned
-    print(f"~{planned} steps planned ({windows_per_clip} windows/clip): "
-          f"warmup {args.warmup}, cosine decay to step {args.total_steps}")
+    print(f"~{planned} steps planned ({windows_per_clip} windows/clip). LR "
+          f"{args.lr * args.lr_high_mult:.2e} for {args.lr_high_sweeps:g} sweeps, then linear to "
+          f"{args.lr:.2e} over {args.lr_decay_sweeps:g} more"
+          + (f", after {args.warmup} warmup steps" if args.warmup else ""))
 
     # ---------------------------------------------------------------- train
     stop = {"now": False}
@@ -239,9 +272,13 @@ def main():
     run = {"started": time.time(), "steps": 0, "clips": 0, "loss": None}
 
     sweep = 0
+    # A clip's use count is how many sweeps it has had, so the least-used clip says where the
+    # schedule is; a resumed run then continues along the curve rather than restarting it.
+    sweeps_done = min((uses.get(n, 0) for n in queue), default=0)
     while queue and not stop["now"] and time.time() < deadline:
       sweep += 1
-      for start in range(0, len(queue), args.shard_clips):
+      shards = max(1, -(-len(queue) // args.shard_clips))
+      for shard_index, start in enumerate(range(0, len(queue), args.shard_clips)):
         if stop["now"] or time.time() >= deadline:
             break
         names = queue[start : start + args.shard_clips]
@@ -259,8 +296,13 @@ def main():
             if args.noise > 0:
                 prev = prev + args.noise * torch.randn_like(prev)
             parts = motion_loss(model(prev, audio), motion, args.w_vel, args.w_acc)
+            # Sweeps already completed, plus how far this sweep has got.
+            sweep_pos = sweeps_done + shard_index / shards
+            lr = lr_at(sweep_pos, args.lr, args.lr_high_mult, args.lr_high_sweeps, args.lr_decay_sweeps)
+            if args.warmup and state["step"] < args.warmup:
+                lr *= (state["step"] + 1) / args.warmup
             for group in optimiser.param_groups:
-                group["lr"] = lr_at(state["step"], args.lr, args.warmup, args.total_steps)
+                group["lr"] = lr
             optimiser.zero_grad(set_to_none=True)
             parts["loss"].backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), args.clip_grad)
@@ -277,12 +319,13 @@ def main():
         val = evaluate(model, val_loader, args, device)
         run["loss"] = float(np.mean(losses)) if losses else run["loss"]
         left = max(0.0, deadline - time.time()) / 60
-        print(f"sweep {sweep}  step {state['step']:6d}  passes {sum(uses.values()):5d}  "
+        print(f"sweep {sweeps_done + 1}  lr {optimiser.param_groups[0]['lr']:.2e}  "
+              f"step {state['step']:6d}  passes {sum(uses.values()):5d}  "
               f"train {run['loss']:.4f}  val {val['loss']:.4f}  {left:.0f} min left")
 
         # One point per sweep, so progress can be plotted without re-running anything.
         state.setdefault("curve", []).append(
-            {"sweep": sweep, "step": state["step"], "minutes": round((time.time() - run["started"]) / 60, 2),
+            {"sweep": sweeps_done + 1, "lr": optimiser.param_groups[0]["lr"], "step": state["step"], "minutes": round((time.time() - run["started"]) / 60, 2),
              "train_loss": run["loss"], "val_loss": val["loss"], "passes": sum(uses.values())})
         state["model_state"] = model.state_dict()
         state["optimiser"] = optimiser.state_dict()
@@ -295,11 +338,14 @@ def main():
           snap_dir = args.out / "snapshots"
           snap_dir.mkdir(exist_ok=True)
           save(snap_dir / f"step{state['step']:06d}.pt", slim(state, model, stats, fps, state["val"]))
+      sweeps_done += 1
       queue = next_queue()  # clips that have hit the cap drop out; the rest come round again
 
     # ---------------------------------------------------------------- finish
     minutes = (time.time() - run["started"]) / 60
-    state["config"]["schedule"] = {"warmup": args.warmup, "total_steps": args.total_steps}
+    state["config"]["schedule"] = {"lr": args.lr, "high_mult": args.lr_high_mult,
+                                   "high_sweeps": args.lr_high_sweeps,
+                                   "decay_sweeps": args.lr_decay_sweeps, "warmup": args.warmup}
     state["history"].append({"minutes": round(minutes, 1), "steps": run["steps"],
                              "passes": run["clips"], "final_train_loss": run["loss"],
                              "best_val": state["best_val"], "ended": time.strftime("%Y-%m-%d %H:%M")})
@@ -335,7 +381,7 @@ def smoke_test(args):
     params = sum(p.numel() for p in model.parameters())
     print(f"loss {first:.4f} -> {last:.4f} over 20 steps ({params/1e6:.2f}M params)")
     print(f"rollout {tuple(rollout.shape)} finite={bool(torch.isfinite(rollout).all())}")
-    print(f"lr schedule: {[round(lr_at(s, 3e-4, 200, 20000), 6) for s in (0, 199, 1000, 20000)]}")
+    print("lr by sweep:", {s: round(lr_at(s, 3e-4, 3.0, 5, 15), 7) for s in (0, 4.9, 5, 12.5, 20, 25)})
     assert rollout.shape == (1, 64, cfg.motion_dim) and torch.isfinite(rollout).all()
     assert last < first, "loss did not go down"
     print("smoke test passed")
