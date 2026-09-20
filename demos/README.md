@@ -26,6 +26,20 @@ For reference, on these held-out clips a frozen pose scores 0.371 and an unrelat
 | `generated_keypoints.npz` | the model's dance for the same audio |
 | `generated_motion.npz` | the same, fitted to the humanoid |
 | `scores.json` | dance_similarity (with its parts) and beat alignment |
+| `ground_truth_humanoid.mp4` | the pose estimate from the video, rendered on the humanoid, with the song |
+| `generated_humanoid.mp4` | the model's dance, rendered the same way, with the same song |
+
+The two mp4s are the quickest way to judge a result: same music, same camera, one driven by the
+real dancer's pose estimate and one by the model. They were made with
+
+```bash
+cd src/pose-estimation
+uv run visualize.py <demo>/generated_motion.npz --render out.mp4 --no-targets
+ffmpeg -i out.mp4 -i <demo>/ground_truth.mp4 -map 0:v:0 -map 1:a:0 \
+  -c:v libx264 -pix_fmt yuv420p -c:a aac -shortest <demo>/generated_humanoid.mp4
+```
+
+(the re-encode is because `visualize.py` writes mp4v, which many players and browsers refuse).
 
 Watch either side:
 
