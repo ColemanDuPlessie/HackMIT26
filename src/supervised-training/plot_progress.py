@@ -57,17 +57,24 @@ def score_snapshot(path: Path, clips: list[dict], device: str, seed_frames: int)
     return rows
 
 
-def baselines(clips: list[dict]) -> tuple[float, float]:
-    """Frozen pose, and dancing a different clip's choreography: the bars to clear."""
-    frozen, other = [], []
+def baselines(clips: list[dict]) -> dict:
+    """Frozen pose, and dancing a different clip's choreography: the bars to clear.
+
+    Both are averaged the two ways the model's score is, so like is compared with like: a
+    plain mean, and one weighted by how much each clip moves.
+    """
+    frozen, other, motion = [], [], []
     for i, clip in enumerate(clips):
         reference = features.unflatten_motion(clip["motion"])
-        frozen.append(score(reference, np.repeat(reference[:1], len(reference), axis=0),
-                            clip["fps"])["final_score"])
+        frozen.append(frozen_baseline(reference, clip["fps"]))
         wrong = features.unflatten_motion(clips[(i + 1) % len(clips)]["motion"])
         n = min(len(reference), len(wrong))
-        other.append(score(reference[:n], wrong[:n], clip["fps"])["final_score"])
-    return float(np.mean(frozen)), float(np.mean(other))
+        other.append(float(score(reference[:n], wrong[:n], clip["fps"])["final_score"]))
+        motion.append(features.motion_amount(reference))
+    weights = np.array(motion)
+    weights = weights / weights.sum() if weights.sum() > 0 else np.full(len(clips), 1 / len(clips))
+    return {"frozen": float(np.mean(frozen)), "frozen_weighted": float((np.array(frozen) * weights).sum()),
+            "other": float(np.mean(other)), "other_weighted": float((np.array(other) * weights).sum())}
 
 
 def main():
@@ -110,26 +117,30 @@ def main():
         ws.append(agg["weighted"])
         print(f"{path.name}: step {step}, mean {agg['mean']:.3f}, "
               f"motion-weighted {agg['weighted']:.3f}")
-    if "baselines" not in cached:
-        cached["baselines"] = list(baselines(clips))
-    frozen, other = cached["baselines"]
+    if not isinstance(cached.get("baselines"), dict):  # absent, or the older two-number form
+        cached["baselines"] = baselines(clips)
+    base = cached["baselines"]
     cache_path.write_text(json.dumps(cached, indent=1))
-    print(f"baselines: frozen pose {frozen:.3f}, a different dance {other:.3f}")
+    print(f"baselines: frozen pose {base['frozen']:.3f} (weighted {base['frozen_weighted']:.3f}), "
+          f"a different dance {base['other']:.3f} (weighted {base['other_weighted']:.3f})")
 
     fig, (top, bottom) = plt.subplots(2, 1, figsize=(9.5, 6.5), sharex=True,
                                       gridspec_kw={"height_ratios": [3, 2], "hspace": 0.18})
     fig.patch.set_facecolor("white")
 
-    top.axhline(other, color=BASELINE_OTHER, lw=1.5, ls=(0, (5, 3)), zorder=1)
-    top.axhline(frozen, color=BASELINE_FROZEN, lw=1.5, ls=(0, (5, 3)), zorder=1)
-    high, low = sorted([(frozen, "frozen pose", BASELINE_FROZEN),
-                        (other, "a different dance", BASELINE_OTHER)], reverse=True)
+    lines = sorted([(base["frozen"], base["frozen_weighted"], "frozen pose", BASELINE_FROZEN),
+                    (base["other"], base["other_weighted"], "a different dance", BASELINE_OTHER)],
+                   reverse=True)
     # A white pad keeps the labels readable where the series crosses them.
     pad = dict(boxstyle="square,pad=0.15", facecolor="white", edgecolor="none")
-    top.annotate(f"{high[1]}  {high[0]:.2f}", (xs[0], high[0]), xytext=(2, 6),
-                 textcoords="offset points", ha="left", color=high[2], fontsize=9, bbox=pad, zorder=4)
-    top.annotate(f"{low[1]}  {low[0]:.2f}", (xs[0], low[0]), xytext=(2, -14),
-                 textcoords="offset points", ha="left", color=low[2], fontsize=9, bbox=pad, zorder=4)
+    for offset, (plain, weighted, name, colour) in zip((6, -14), lines):
+        top.axhline(plain, color=colour, lw=1.5, ls=(0, (5, 3)), zorder=1)
+        top.axhline(weighted, color=colour, lw=1.5, ls=(0, (1, 2)), zorder=1)
+        top.annotate(f"{name}  {plain:.2f} · weighted {weighted:.2f}", (xs[0], plain),
+                     xytext=(2, offset), textcoords="offset points", ha="left", color=colour,
+                     fontsize=9, bbox=pad, zorder=4)
+    top.annotate("dashed: plain mean · dotted: motion-weighted", (xs[-1], 0.02),
+                 xytext=(0, 0), textcoords="offset points", ha="right", color=MUTED, fontsize=8.5)
     top.plot(xs, ys, color=SERIES, lw=2, marker="o", ms=5, zorder=3)
     top.plot(xs, ws, color=SERIES_WEIGHTED, lw=2, marker="o", ms=5, zorder=3)
     top.annotate(f"plain mean  {ys[-1]:.2f}", (xs[-1], ys[-1]), xytext=(6, 0),
@@ -138,7 +149,7 @@ def main():
                  textcoords="offset points", va="center", color=SERIES_WEIGHTED, fontsize=9.5)
     top.set_ylabel("dance_similarity", color=MUTED, fontsize=10)
     top.set_title("Held-out score over the run", color=INK, fontsize=13, loc="left", pad=10)
-    top.set_ylim(0, max(0.45, max(ys + ws + [frozen, other]) * 1.25))
+    top.set_ylim(0, max(0.45, max(ys + ws + list(base.values())) * 1.25))
 
     if curve:
         bottom.plot([p["step"] for p in curve], [p["val_loss"] for p in curve],
