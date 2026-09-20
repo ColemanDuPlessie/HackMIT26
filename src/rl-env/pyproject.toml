@@ -1,0 +1,18 @@
+[project]
+name = "rl-env"
+version = "0.1.0"
+description = "Gymnasium environment: physically track a retargeted dance with the MuJoCo humanoid"
+requires-python = ">=3.10,<3.13"
+dependencies = [
+    "pose-estimation",
+    "numpy",
+    "mujoco>=3.2",
+    "gymnasium>=1.0",
+    "stable-baselines3>=2.4",
+]
+
+[tool.uv]
+package = false
+
+[tool.uv.sources]
+pose-estimation = { path = "../pose-estimation", editable = true }

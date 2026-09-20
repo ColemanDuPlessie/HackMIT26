@@ -1,0 +1,6 @@
+.venv/
+__pycache__/
+runs/
+*.zip
+*.pkl
+MUJOCO_LOG.TXT
