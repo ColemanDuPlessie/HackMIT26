@@ -1,0 +1,24 @@
+{
+  "clip": "gJS_sFM_c01_d01_mJS0_ch01_01",
+  "split": "train",
+  "checkpoint": "/Users/cdupe/Documents/HackMIT26/src/supervised-training/checkpoints-v2/model.pt",
+  "seconds": 15.98,
+  "fps": 59.94,
+  "seed_frames": 30,
+  "dance_similarity": {
+    "final_score": 0.1496,
+    "position_score": 0.0189,
+    "position_error": 0.3809,
+    "angle_score": 0.0323,
+    "angle_error_degrees": 34.8977,
+    "trajectory_score": 0.8224,
+    "trajectory_error": 0.0167,
+    "timing_score": 1.0,
+    "timing_shift_frames": 0.0,
+    "timing_error_seconds": 0.0
+  },
+  "beat_alignment": {
+    "generated": 0.595,
+    "ground_truth": 0.833
+  }
+}

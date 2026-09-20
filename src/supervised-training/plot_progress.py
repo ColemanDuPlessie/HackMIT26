@@ -5,6 +5,10 @@ scored with reward-calculation's dance_similarity, and drawn against the two bas
 say whether the model is doing anything at all: holding one pose, and an unrelated dance.
 Validation loss (recorded every sweep) is drawn underneath on its own panel.
 
+Two means are drawn. The plain one flatters a model that barely moves, because clips where the
+dancer waits for the music score well against a frozen pose; the motion-weighted one gives each
+clip a say in proportion to how much dancing it contains.
+
 Usage:
     uv run plot_progress.py                                  # checkpoints/ -> progress.png
     uv run plot_progress.py --out checkpoints-cap50 --png cap50.png
@@ -23,28 +27,34 @@ import matplotlib.pyplot as plt  # noqa: E402
 
 import features  # noqa: E402
 from dataset import load_clips, sample_across_genres  # noqa: E402
-from evaluate import score  # noqa: E402
+from evaluate import frozen_baseline, score, weighted_means  # noqa: E402
 from generate import load_checkpoint  # noqa: E402
 
 ROOT = Path(__file__).resolve().parent
-# One hue for the measured series; everything else is recessive ink, so identity is never
-# carried by colour alone (each panel has a single series, named by its title).
+# Two measured series, both direct-labelled so identity never rests on colour alone. The pair
+# passes the CVD and contrast checks (validate_palette.js, light surface).
 INK, MUTED, GRID = "#1f2933", "#7b8794", "#e4e7eb"
 SERIES = "#2f6fdb"
+SERIES_WEIGHTED = "#d97706"
 BASELINE_FROZEN, BASELINE_OTHER = "#9aa5b1", "#616e7c"
 
 
-def score_snapshot(path: Path, clips: list[dict], device: str, seed_frames: int) -> float:
+def score_snapshot(path: Path, clips: list[dict], device: str, seed_frames: int) -> list[dict]:
+    """One row per held-out clip: its score, how much it moves, and its frozen-pose baseline."""
     model, stats, _ = load_checkpoint(path, device)
-    scores = []
+    rows = []
     for clip in clips:
         audio = torch.from_numpy(stats.normalise_audio(clip["audio"]).astype(np.float32))[None].to(device)
         seed = torch.from_numpy(
             stats.normalise_motion(clip["motion"][:seed_frames]).astype(np.float32))[None].to(device)
         generated = features.unflatten_motion(
             stats.denormalise_motion(model.generate(audio, seed=seed))[0].cpu().numpy())
-        scores.append(score(features.unflatten_motion(clip["motion"]), generated, clip["fps"])["final_score"])
-    return float(np.mean(scores))
+        reference = features.unflatten_motion(clip["motion"])
+        rows.append({"name": clip["name"],
+                     "score": float(score(reference, generated, clip["fps"])["final_score"]),
+                     "motion": features.motion_amount(reference),
+                     "frozen": frozen_baseline(reference, clip["fps"])})
+    return rows
 
 
 def baselines(clips: list[dict]) -> tuple[float, float]:
@@ -87,23 +97,26 @@ def main():
     if cache_path.exists() and not args.rescore:
         cached = json.loads(cache_path.read_text())
 
-    xs, ys = [], []
+    xs, ys, ws = [], [], []
     for path in snapshots:
         step = int(path.stem.replace("step", ""))
-        value = cached.get(path.name)
-        if value is None:
-            value = score_snapshot(path, clips, args.device, args.seed_frames)
-            cached[path.name] = value
+        rows = cached.get(path.name)
+        if not isinstance(rows, list):  # absent, or an older cache holding just the mean
+            rows = score_snapshot(path, clips, args.device, args.seed_frames)
+            cached[path.name] = rows
+        agg = weighted_means(rows)
         xs.append(step)
-        ys.append(value)
-        print(f"{path.name}: step {step}, dance_similarity {value:.3f}")
+        ys.append(agg["mean"])
+        ws.append(agg["weighted"])
+        print(f"{path.name}: step {step}, mean {agg['mean']:.3f}, "
+              f"motion-weighted {agg['weighted']:.3f}")
     if "baselines" not in cached:
         cached["baselines"] = list(baselines(clips))
     frozen, other = cached["baselines"]
     cache_path.write_text(json.dumps(cached, indent=1))
     print(f"baselines: frozen pose {frozen:.3f}, a different dance {other:.3f}")
 
-    fig, (top, bottom) = plt.subplots(2, 1, figsize=(8, 6.5), sharex=True,
+    fig, (top, bottom) = plt.subplots(2, 1, figsize=(9.5, 6.5), sharex=True,
                                       gridspec_kw={"height_ratios": [3, 2], "hspace": 0.18})
     fig.patch.set_facecolor("white")
 
@@ -118,11 +131,14 @@ def main():
     top.annotate(f"{low[1]}  {low[0]:.2f}", (xs[0], low[0]), xytext=(2, -14),
                  textcoords="offset points", ha="left", color=low[2], fontsize=9, bbox=pad, zorder=4)
     top.plot(xs, ys, color=SERIES, lw=2, marker="o", ms=5, zorder=3)
-    top.annotate(f"{ys[-1]:.2f}", (xs[-1], ys[-1]), xytext=(6, 0), textcoords="offset points",
-                 va="center", color=INK, fontsize=10, fontweight="medium")
+    top.plot(xs, ws, color=SERIES_WEIGHTED, lw=2, marker="o", ms=5, zorder=3)
+    top.annotate(f"plain mean  {ys[-1]:.2f}", (xs[-1], ys[-1]), xytext=(6, 0),
+                 textcoords="offset points", va="center", color=SERIES, fontsize=9.5)
+    top.annotate(f"motion-weighted  {ws[-1]:.2f}", (xs[-1], ws[-1]), xytext=(6, 0),
+                 textcoords="offset points", va="center", color=SERIES_WEIGHTED, fontsize=9.5)
     top.set_ylabel("dance_similarity", color=MUTED, fontsize=10)
     top.set_title("Held-out score over the run", color=INK, fontsize=13, loc="left", pad=10)
-    top.set_ylim(0, max(0.45, max(ys + [frozen, other]) * 1.25))
+    top.set_ylim(0, max(0.45, max(ys + ws + [frozen, other]) * 1.25))
 
     if curve:
         bottom.plot([p["step"] for p in curve], [p["val_loss"] for p in curve],
@@ -156,7 +172,7 @@ def main():
     passes = sum(state["uses"].values())
     fig.text(0.125, 0.955, f"{len(state['uses'])} clips, {passes} passes, {state['step']} steps, "
                            f"{len(clips)} held-out clips", color=MUTED, fontsize=9.5)
-    fig.savefig(args.png, dpi=160, bbox_inches="tight", facecolor="white")
+    fig.savefig(args.png, dpi=160, bbox_inches="tight", facecolor="white", pad_inches=0.35)
     print(f"\nWrote {args.png}")
 
 
